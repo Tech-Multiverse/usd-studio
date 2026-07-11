@@ -12,8 +12,16 @@ declare global {
             signalingPort: number;
             fps: number;
             maxReconnects: number;
-            onStart: (msg: { status: string; info?: string }) => void;
-            onStop: (msg: { status: string; info?: string }) => void;
+            onStart: (msg: {
+              action?: string;
+              status: string;
+              info?: string;
+            }) => void;
+            onStop: (msg: {
+              action?: string;
+              status: string;
+              info?: string;
+            }) => void;
             onUpdate?: (msg: unknown) => void;
           };
         }) => Promise<unknown>;
@@ -30,6 +38,7 @@ export async function connectWebRTC(
   signalPort: number,
   videoElementId: string,
   onStatus: (msg: string) => void,
+  onStarted?: () => void,
 ): Promise<() => void> {
   const { AppStreamer, StreamType } = window.OVWebRTC;
 
@@ -44,10 +53,20 @@ export async function connectWebRTC(
       fps: 60,
       maxReconnects: 3,
       onStart: (msg) => {
-        onStatus(msg.status === 'success' ? 'connected' : `start: ${msg.status} ${msg.info ?? ''}`);
+        if (msg.action !== 'start' && msg.action !== undefined) return;
+        if (msg.status === 'success') {
+          onStatus('connected');
+          onStarted?.();
+        } else {
+          onStatus(`start: ${msg.status} ${msg.info ?? ''}`);
+        }
       },
       onStop: (msg) => {
+        if (msg.action !== 'terminate' && msg.action !== undefined) return;
         onStatus(`stopped: ${msg.status} ${msg.info ?? ''}`);
+      },
+      onUpdate: (msg) => {
+        onStatus(`update: ${JSON.stringify(msg)}`);
       },
     },
   });

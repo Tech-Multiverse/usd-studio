@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     render_height: int = 720
     target_fps: float = 60.0
     data_dir: str = "./data"
-    outputs_dir: str = "./outputs"
+    outputs_dir: str = "../outputs"
     uploads_dir: str = "./uploads"
     default_scene: str = ""
 

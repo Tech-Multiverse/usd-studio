@@ -15,6 +15,11 @@ def _camera_path_exists(prims: list[str]) -> str | None:
 
 
 def _render_product_exists(prims: list[str]) -> str | None:
+    # Prefer an injected Studio render product over existing scene ones,
+    # because scene viewport textures may reference missing sensors/cameras.
+    for p in prims:
+        if p.startswith("/Studio/") and "RenderProduct" in p:
+            return p
     for p in prims:
         if "RenderProduct" in p:
             return p
@@ -31,36 +36,32 @@ def build_scene_layer(
 ) -> tuple[str, str, str]:
     """Return (layer_usda, camera_path, render_product_path) for the composed scene.
 
-    The returned USDA string subLayers the original scene and adds missing render
-    configuration. Paths are returned so the renderer knows what to step.
+    The returned USDA string subLayers the original scene and adds a Studio
+    render product at the requested resolution. If ``camera_path`` points to a
+    camera inside the original scene (not under ``/Studio/``), that camera is
+    used for the render product; otherwise a ``/Studio/Camera`` is created.
+
+    Paths are returned so the renderer knows what to step.
     """
     scene_path = scene_path.resolve()
 
-    # Defaults
-    camera_path = camera_path or "/Studio/Camera"
     render_product_path = render_product_path or "/Studio/RenderProduct"
     render_var_path = "/Studio/Vars/LdrColor"
 
-    if camera_transform is None:
-        camera_transform = {
-            "translate": (0.3, -0.35, 0.2),
-            "rotateYXZ": (-20.0, 50.0, 0.0),
-        }
+    use_scene_camera = bool(camera_path and not camera_path.startswith("/Studio/"))
+    if not camera_path:
+        camera_path = "/Studio/Camera"
 
-    tx, ty, tz = camera_transform["translate"]
-    rx, ry, rz = camera_transform["rotateYXZ"]
-
-    usda = f"""#usda 1.0
-(
-    defaultPrim = "Studio"
-    subLayers = [
-        @{_escape_asset_path(scene_path)}@
-    ]
-)
-
-def "Studio"
-{{
-    def Camera "Camera" (
+    camera_block = ""
+    if not use_scene_camera:
+        if camera_transform is None:
+            camera_transform = {
+                "translate": (0.3, -0.35, 0.2),
+                "rotateYXZ": (-20.0, 50.0, 0.0),
+            }
+        tx, ty, tz = camera_transform["translate"]
+        rx, ry, rz = camera_transform["rotateYXZ"]
+        camera_block = f"""    def Camera "Camera" (
         prepend apiSchemas = ["OmniRtxCameraAutoExposureAPI_1", "OmniRtxCameraExposureAPI_1"]
     )
     {{
@@ -79,7 +80,19 @@ def "Studio"
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateYXZ", "xformOp:scale"]
     }}
 
-    def DomeLight "DomeLight" (
+"""
+
+    usda = f"""#usda 1.0
+(
+    defaultPrim = "Studio"
+    subLayers = [
+        @{_escape_asset_path(scene_path)}@
+    ]
+)
+
+def "Studio"
+{{
+{camera_block}    def DomeLight "DomeLight" (
         prepend apiSchemas = ["ShapingAPI"]
     )
     {{
@@ -106,7 +119,7 @@ def "Studio"
         prepend apiSchemas = ["OmniRtxSettingsCommonAdvancedAPI_1", "OmniRtxSettingsRtAdvancedAPI_1", "OmniRtxSettingsPtAdvancedAPI_1"]
     )
     {{
-        rel camera = </Studio/Camera>
+        rel camera = <{camera_path}>
         token omni:rtx:background:source:type = "domeLight"
         color3f omni:rtx:rt:ambientLight:color = (0.1, 0.1, 0.1)
         rel orderedVars = </Studio/Vars/LdrColor>

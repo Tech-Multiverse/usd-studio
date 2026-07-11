@@ -16,10 +16,12 @@ export default function App() {
   const [scene, setScene] = useState<SceneInfo | null>(null);
   const [webrtcPort, setWebrtcPort] = useState(49100);
   const [connected, setConnected] = useState(false);
+  const [streamSize, setStreamSize] = useState({ width: 1280, height: 720 });
   const [logs, setLogs] = useState<string[]>([]);
   const disconnectRef = useRef<(() => void) | null>(null);
 
   const log = (msg: string) => {
+    console.log(msg);
     setLogs((prev: string[]) => [msg, ...prev].slice(0, 50));
   };
 
@@ -31,7 +33,9 @@ export default function App() {
         return fetch(`${API_BASE}/scene`);
       })
       .then((r) => r.json())
-      .then((data: SceneInfo) => setScene(data))
+      .then((data: SceneInfo) => {
+        setScene(data);
+      })
       .catch((err) => log(`Health check failed: ${String(err)}`));
   }, []);
 
@@ -59,12 +63,23 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Stream start failed');
       setWebrtcPort(data.signal_port);
+      setStreamSize({ width: data.width, height: data.height });
       log(`WebRTC signal port: ${data.signal_port}`);
 
       disconnectRef.current = await connectWebRTC(
         data.signal_port,
         'remote-video',
-        (err) => log(`WebRTC: ${err}`),
+        (msg: string) => log(`WebRTC: ${msg}`),
+        () => {
+          const video = document.getElementById('remote-video') as HTMLVideoElement | null;
+          if (video) {
+            video.muted = false;
+            if (video.srcObject) {
+              video.play().catch((e) => console.warn('video.play() rejected:', e));
+            }
+            video.focus();
+          }
+        },
       );
       setConnected(true);
     } catch (err) {
@@ -161,7 +176,7 @@ export default function App() {
       </aside>
 
       <main className="viewport">
-        <video id="remote-video" ref={videoRef} autoPlay playsInline muted />
+        <video id="remote-video" ref={videoRef} width={streamSize.width} height={streamSize.height} autoPlay playsInline tabIndex={-1} />
         {!connected && <div className="status">Stream not connected</div>}
       </main>
     </div>

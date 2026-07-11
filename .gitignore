@@ -16,8 +16,19 @@ frontend/dist/
 # Outputs / runtime
 outputs/
 *.mp4
-*.png
 *.jpg
+backend/*.dmp.zip
+backend/*.dmp.zip.toml
+backend/crash_*.txt
+backend/ovrtx-studio-*.nv-gpudmp
+backend_stdout.txt
+backend_stderr.txt
+webrtc_internals_dump.txt
+
+# Allow the AI/IDE to view rendered test stills
+*.png
+!outputs/*.png
+!backend/outputs/*.png
 
 # Data downloaded/generated at runtime (keep tracked samples readable)
 data/

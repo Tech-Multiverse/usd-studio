@@ -40,6 +40,8 @@ class WebRTCStreamer:
         self._running = False
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._frame_count = 0
+        self._last_log = 0.0
 
     def start(self) -> dict:
         """Initialize ovstream and start the WebRTC server."""
@@ -107,8 +109,15 @@ class WebRTCStreamer:
                 )
                 try:
                     self._server.stream_video(frame)
-                except ovstream.OvstreamError:
-                    pass  # no client connected
+                    self._frame_count += 1
+                    now = time.time()
+                    if now - self._last_log >= 5.0:
+                        logger.info("Streamed %d frames in last 5s", self._frame_count)
+                        self._frame_count = 0
+                        self._last_log = now
+                except ovstream.OvstreamError as exc:
+                    # No client connected is normal; only log at debug.
+                    logger.debug("stream_video error: %s", exc)
             except Exception as exc:
                 logger.exception("Stream loop error: %s", exc)
             time.sleep(max(0.0, target_dt - (1.0 / 60.0)))

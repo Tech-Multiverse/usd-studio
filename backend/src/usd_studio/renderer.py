@@ -48,7 +48,15 @@ class StudioRenderer:
                 attribute_filter_mode=ovrtx.AttributeFilterMode.NONE,
             )
             if products:
-                self.render_product = next(iter(products))
+                # Prefer a Studio-injected render product over any existing
+                # viewport textures that may be tied to missing sensors/cameras.
+                paths = list(products.keys())
+                for p in paths:
+                    if p.startswith("/Studio/"):
+                        self.render_product = p
+                        break
+                else:
+                    self.render_product = paths[0]
                 logger.info("Discovered render product: %s", self.render_product)
             else:
                 logger.warning("No RenderProduct found in scene")
@@ -77,11 +85,106 @@ class StudioRenderer:
                 return path
         return paths[0]
 
+    def _frame_camera_to_scene(self) -> None:
+        """Position the current camera to frame the scene bounding box.
+
+        Filters out lights, cameras, render settings, and prims with non-finite
+        or grossly large authored extents (e.g. ground planes).
+        """
+        try:
+            prims = self._renderer.query_prims(
+                require_all=[(ovrtx.FilterKind.HAS_ATTRIBUTE, "extent")],
+                attribute_filter_mode=ovrtx.AttributeFilterMode.NONE,
+            )
+            if not prims:
+                logger.warning("No prims with extent found; cannot auto-frame")
+                return
+
+            # Collect per-prim world-space bounding boxes, skipping known
+            # non-renderable or unbounded prims.
+            skip_tokens = {"light", "camera", "render", "studio", "looks", "material"}
+            candidates = []
+            for path in prims:
+                lower = path.lower()
+                if any(tok in lower for tok in skip_tokens):
+                    continue
+                if not lower.startswith("/world"):
+                    continue
+                try:
+                    xform_tensor = self._renderer.read_attribute("omni:xform", [path])
+                    xform = np.from_dlpack(xform_tensor).reshape(4, 4)
+                    extent_tensor = self._renderer.read_attribute("extent", [path])
+                    extent = np.from_dlpack(extent_tensor).reshape(-1, 3)
+                    if extent.shape[0] < 2:
+                        continue
+                    local_min, local_max = extent[0], extent[1]
+                    if not np.isfinite(local_min).all() or not np.isfinite(local_max).all():
+                        continue
+                    size = local_max - local_min
+                    if not np.all(size >= 0):
+                        continue
+                    diagonal = float(np.linalg.norm(size))
+                    if not np.isfinite(diagonal) or diagonal <= 0:
+                        continue
+                    candidates.append((path, xform, local_min, local_max, diagonal))
+                except Exception:
+                    continue
+
+            if not candidates:
+                logger.warning("No finite renderable prims found; cannot auto-frame")
+                return
+
+            # Reject outliers whose diagonal is more than 10x the median diagonal.
+            # This drops huge ground planes while keeping the actual model.
+            diagonals = sorted(c[4] for c in candidates)
+            median_diag = diagonals[len(diagonals) // 2]
+            max_allowed = max(median_diag * 10.0, median_diag + 1.0)
+
+            world_min = np.full(3, float("inf"), dtype=np.float64)
+            world_max = np.full(3, -float("inf"), dtype=np.float64)
+            included = 0
+            for _path, xform, local_min, local_max, diagonal in candidates:
+                if diagonal > max_allowed:
+                    continue
+                corners = np.array([
+                    [local_min[0], local_min[1], local_min[2], 1.0],
+                    [local_min[0], local_min[1], local_max[2], 1.0],
+                    [local_min[0], local_max[1], local_min[2], 1.0],
+                    [local_min[0], local_max[1], local_max[2], 1.0],
+                    [local_max[0], local_min[1], local_min[2], 1.0],
+                    [local_max[0], local_min[1], local_max[2], 1.0],
+                    [local_max[0], local_max[1], local_min[2], 1.0],
+                    [local_max[0], local_max[1], local_max[2], 1.0],
+                ], dtype=np.float64)
+                world_corners = corners @ xform.T
+                world_min = np.minimum(world_min, world_corners[:, :3].min(axis=0))
+                world_max = np.maximum(world_max, world_corners[:, :3].max(axis=0))
+                included += 1
+
+            if not np.isfinite(world_min).all() or not np.isfinite(world_max).all():
+                logger.warning("Could not compute scene bounds")
+                return
+
+            center = (world_min + world_max) * 0.5
+            size = world_max - world_min
+            radius = float(np.linalg.norm(size) * 0.5)
+            if radius <= 0 or not np.isfinite(radius):
+                radius = 1.0
+
+            distance = max(radius * 2.5, 0.001)
+            yaw = math.radians(45)
+            pitch = math.radians(30)
+            self.orbit_camera(center, distance, yaw, pitch)
+            logger.info("Camera framed to %d prims: center=%s radius=%.4f", included, center, radius)
+        except Exception as exc:
+            logger.warning("Auto-frame failed: %s", exc)
+
     def load_scene(
         self,
         usd_path: str | Path,
         camera_path: Optional[str] = None,
         render_product: Optional[str] = None,
+        auto_frame: bool = True,
     ) -> dict:
         """Open a USD stage, injecting camera/light/render product if needed."""
         with self._lock:
@@ -98,19 +201,21 @@ class StudioRenderer:
             self._renderer.reset()
             self._discover_paths()
 
-            # If no render product or camera, compose an injection layer.
-            if not self.render_product or not self.camera_path:
-                logger.info("Scene lacks camera/render product; injecting defaults")
-                layer_usda, self.camera_path, self.render_product = build_scene_layer(
-                    self.scene_path,
-                    camera_path=self.camera_path,
-                    render_product_path=self.render_product,
-                    width=self.width,
-                    height=self.height,
-                )
-                self._renderer.open_usd_from_string(layer_usda)
-                self._renderer.reset()
-                self._discover_paths()
+            # Compose the scene through a Studio injection layer so we control
+            # the render product resolution and can use the scene's camera.
+            logger.info("Composing Studio render product at %dx%d", self.width, self.height)
+            layer_usda, default_camera, default_product = build_scene_layer(
+                self.scene_path,
+                camera_path=self.camera_path,
+                render_product_path=None,
+                width=self.width,
+                height=self.height,
+            )
+            self.camera_path = self.camera_path or default_camera
+            self.render_product = default_product
+            self._renderer.open_usd_from_string(layer_usda)
+            self._renderer.reset()
+            self._discover_paths()
 
             # Warm-up frames
             if self.render_product:
@@ -123,6 +228,10 @@ class StudioRenderer:
             else:
                 self.has_scene = False
                 raise RuntimeError("No render product available after scene load")
+
+            # If we injected a camera, frame it on the scene bounds.
+            if auto_frame and self.camera_path and self.camera_path.startswith("/Studio/"):
+                self._frame_camera_to_scene()
 
             prims = self._renderer.query_prims(attribute_filter_mode=ovrtx.AttributeFilterMode.NONE)
             return {

@@ -38,6 +38,7 @@ class WebRTCStreamer:
         self._event: wp.Event | None = None
         self._stream: wp.Stream | None = None
         self._running = False
+        self._initialized = False
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._frame_count = 0
@@ -46,6 +47,7 @@ class WebRTCStreamer:
     def start(self) -> dict:
         """Initialize ovstream and start the WebRTC server."""
         ovstream.initialize()
+        self._initialized = True
 
         # Discover actual resolution from a warm-up frame.
         with self.renderer.render_frame_cuda() as mapping:
@@ -132,5 +134,10 @@ class WebRTCStreamer:
             except ovstream.OvstreamError:
                 pass
             self._server.close()
-        ovstream.shutdown()
+        if self._initialized:
+            try:
+                ovstream.shutdown()
+            except ovstream.OvstreamError:
+                pass
+            self._initialized = False
         logger.info("WebRTC server stopped")

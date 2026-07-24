@@ -165,7 +165,7 @@ class StudioRenderer:
                     [local_max[0], local_max[1], local_min[2], 1.0],
                     [local_max[0], local_max[1], local_max[2], 1.0],
                 ], dtype=np.float64)
-                world_corners = corners @ xform.T
+                world_corners = corners @ xform
                 world_min = np.minimum(world_min, world_corners[:, :3].min(axis=0))
                 world_max = np.maximum(world_max, world_corners[:, :3].max(axis=0))
                 included += 1
@@ -338,7 +338,7 @@ class StudioRenderer:
         matrix[0, :3] = right
         matrix[1, :3] = up
         matrix[2, :3] = -forward
-        matrix[:3, 3] = eye
+        matrix[3, :3] = eye
         self.set_camera_transform(matrix)
 
     def list_cameras(self) -> list[str]:
@@ -421,7 +421,7 @@ class StudioRenderer:
     def _camera_basis(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Return (eye, forward, right, up) from the current camera transform."""
         matrix = self.get_camera_transform()
-        eye = matrix[:3, 3].copy()
+        eye = matrix[3, :3].copy()
         forward = -matrix[2, :3].copy()
         right = matrix[0, :3].copy()
         up = matrix[1, :3].copy()
@@ -443,7 +443,7 @@ class StudioRenderer:
         matrix[0, :3] = right
         matrix[1, :3] = up
         matrix[2, :3] = -forward
-        matrix[:3, 3] = eye
+        matrix[3, :3] = eye
         return matrix
 
     def get_camera_state(self) -> dict:
@@ -499,7 +499,7 @@ class StudioRenderer:
             # Pan both eye and pivot so orbit continues from the same relative point.
             eye += delta
             matrix = self.get_camera_transform()
-            matrix[:3, 3] = eye
+            matrix[3, :3] = eye
             self.set_camera_transform(matrix)
 
     def zoom_delta(self, delta: float) -> None:

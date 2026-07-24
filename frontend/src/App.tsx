@@ -10,6 +10,15 @@ interface SceneInfo {
   render_product?: string;
 }
 
+interface PhysicsStatus {
+  running: boolean;
+  ready: boolean;
+  playing: boolean;
+  time: number;
+  bodies: string[];
+  error?: string | null;
+}
+
 export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [scenePath, setScenePath] = useState('');
@@ -18,6 +27,8 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [streamSize, setStreamSize] = useState({ width: 1280, height: 720 });
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [physics, setPhysics] = useState<PhysicsStatus | null>(null);
+  const [physicsBusy, setPhysicsBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const disconnectRef = useRef<(() => void) | null>(null);
   const mouseRef = useRef<{ down: boolean; button: number; x: number; y: number; moved: boolean }>({
@@ -47,6 +58,18 @@ export default function App() {
       .catch((err) => log(`Health check failed: ${String(err)}`));
   }, []);
 
+  useEffect(() => {
+    const updatePhysics = () => {
+      fetch(`${API_BASE}/physics/status`)
+        .then((response) => response.json())
+        .then((data: PhysicsStatus) => setPhysics(data))
+        .catch(() => undefined);
+    };
+    updatePhysics();
+    const timer = window.setInterval(updatePhysics, 500);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const loadScene = async () => {
     if (!scenePath) return;
     try {
@@ -58,6 +81,7 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Load failed');
       setScene({ loaded: true, scene: data.scene, camera: data.camera, render_product: data.render_product });
+      setPhysics(null);
       log(`Loaded ${data.scene} with ${data.prim_count} prims`);
     } catch (err) {
       log(`Load error: ${String(err)}`);
@@ -114,6 +138,21 @@ export default function App() {
       log(`Saved still: ${data.path}`);
     } catch (err) {
       log(`Render error: ${String(err)}`);
+    }
+  };
+
+  const runPhysics = async (action: 'initialize' | 'play' | 'pause' | 'step' | 'reset') => {
+    setPhysicsBusy(true);
+    try {
+      const response = await fetch(`${API_BASE}/physics/${action}`, { method: 'POST' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || `Physics ${action} failed`);
+      setPhysics(data);
+      log(`Physics: ${action}`);
+    } catch (err) {
+      log(`Physics error: ${String(err)}`);
+    } finally {
+      setPhysicsBusy(false);
     }
   };
 
@@ -261,6 +300,51 @@ export default function App() {
               <span className="error">No scene loaded</span>
             )}
           </div>
+        </div>
+
+        <div className="group">
+          <label>Physics simulation</label>
+          <div className="status physics-status">
+            {physics?.error ? (
+              <span className="error">{physics.error}</span>
+            ) : physics?.ready ? (
+              <>
+                <span className={physics.playing ? 'success' : ''}>
+                  {physics.playing ? 'Playing' : 'Paused'}
+                </span>
+                <br />
+                Time: {physics.time.toFixed(2)}s
+                <br />
+                Rigid bodies: {physics.bodies.length}
+              </>
+            ) : (
+              'Not initialized'
+            )}
+          </div>
+          <button
+            onClick={() => void runPhysics('initialize')}
+            disabled={!scene?.loaded || physicsBusy || Boolean(physics?.running)}
+          >
+            Initialize
+          </button>
+          <button
+            onClick={() => void runPhysics(physics?.playing ? 'pause' : 'play')}
+            disabled={!physics?.ready || physicsBusy}
+          >
+            {physics?.playing ? 'Pause' : 'Play'}
+          </button>
+          <button
+            onClick={() => void runPhysics('step')}
+            disabled={!physics?.ready || physicsBusy || physics?.playing}
+          >
+            Step
+          </button>
+          <button
+            onClick={() => void runPhysics('reset')}
+            disabled={!physics?.ready || physicsBusy}
+          >
+            Reset
+          </button>
         </div>
 
         <div className="group">

@@ -32,7 +32,7 @@ class StudioRenderer:
         self.camera_path = camera_path
         self.scene_path: Optional[Path] = None
         self.has_scene = False
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         # Camera orbit state; updated by mouse interactions.
         self._camera_center = np.array([0.0, 0.0, 0.0], dtype=np.float64)
@@ -40,6 +40,7 @@ class StudioRenderer:
         self._camera_yaw = math.radians(45.0)
         self._camera_pitch = math.radians(30.0)
         self._selected_path: Optional[str] = None
+        self._physics_scales: dict[str, np.ndarray] = {}
 
         config = ovrtx.RendererConfig(
             selection_outline_enabled=True,
@@ -219,6 +220,7 @@ class StudioRenderer:
                 raise FileNotFoundError(usd_path)
 
             self.scene_path = usd_path.resolve()
+            self._physics_scales.clear()
             self.camera_path = camera_path
             self.render_product = render_product
 
@@ -354,6 +356,67 @@ class StudioRenderer:
                 attribute_filter_mode=ovrtx.AttributeFilterMode.NONE,
             )
             return list(products.keys())
+
+    def list_rigid_bodies(self) -> list[str]:
+        with self._lock:
+            prims = self._renderer.query_prims(
+                attribute_filter_mode=ovrtx.AttributeFilterMode.ALL,
+            )
+            paths = []
+            for path, attributes in prims.items():
+                if "physics:rigidBodyEnabled" not in attributes:
+                    continue
+                try:
+                    enabled = np.from_dlpack(
+                        self._renderer.read_attribute("physics:rigidBodyEnabled", [path])
+                    ).reshape(-1)
+                    if enabled.size and not bool(enabled[0]):
+                        continue
+                except Exception:
+                    pass
+                paths.append(path)
+            return paths
+
+    def apply_world_poses(self, prims: list[dict]) -> None:
+        if not prims:
+            return
+        with self._lock:
+            world_matrices = {
+                item["path"]: np.asarray(item["matrix4d"], dtype=np.float64)
+                for item in prims
+                if item.get("path") and item.get("matrix4d")
+            }
+            for path in world_matrices:
+                if path in self._physics_scales:
+                    continue
+                try:
+                    authored = np.from_dlpack(
+                        self._renderer.read_attribute("omni:xform", [path])
+                    ).reshape(4, 4)
+                    scale = np.linalg.norm(authored[:3, :3], axis=1)
+                    self._physics_scales[path] = np.diag([*scale, 1.0])
+                except Exception:
+                    self._physics_scales[path] = np.eye(4, dtype=np.float64)
+            paths = sorted(world_matrices, key=lambda path: path.count("/"))
+            local_matrices = []
+            for path in paths:
+                parent_path = path.rsplit("/", 1)[0]
+                parent_world = world_matrices.get(parent_path)
+                if parent_world is None and parent_path:
+                    try:
+                        parent_tensor = self._renderer.read_attribute("omni:xform", [parent_path])
+                        parent_world = np.from_dlpack(parent_tensor).reshape(4, 4).copy()
+                    except Exception:
+                        parent_world = np.eye(4, dtype=np.float64)
+                if parent_world is None:
+                    parent_world = np.eye(4, dtype=np.float64)
+                rigid_local = world_matrices[path] @ np.linalg.inv(parent_world)
+                local_matrices.append(self._physics_scales[path] @ rigid_local)
+            self._renderer.write_attribute(
+                prim_paths=paths,
+                attribute_name="omni:xform",
+                tensor=np.stack(local_matrices),
+            )
 
     def _camera_basis(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Return (eye, forward, right, up) from the current camera transform."""

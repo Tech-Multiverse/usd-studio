@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from .config import settings
+from .physics import PhysicsController
 from .renderer import StudioRenderer
 from .streamer import WebRTCStreamer
 
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 renderer: Optional[StudioRenderer] = None
 streamer: Optional[WebRTCStreamer] = None
+physics: Optional[PhysicsController] = None
 
 
 class LoadSceneRequest(BaseModel):
@@ -67,13 +69,14 @@ class StillRenderRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global renderer, streamer
+    global renderer, streamer, physics
     logging.basicConfig(level=logging.INFO)
     Path(settings.uploads_dir).mkdir(parents=True, exist_ok=True)
     Path(settings.outputs_dir).mkdir(parents=True, exist_ok=True)
 
     renderer = StudioRenderer(width=settings.render_width, height=settings.render_height)
     streamer = WebRTCStreamer(renderer, signal_port=settings.webrtc_signal_port)
+    physics = PhysicsController(renderer.apply_world_poses)
 
     # Load the default scene if one is configured.
     default = settings.default_scene or ""
@@ -87,6 +90,8 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        if physics:
+            physics.stop()
         if streamer:
             streamer.stop()
         if renderer:
@@ -128,6 +133,8 @@ async def load_scene(req: LoadSceneRequest):
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Scene not found: {path}")
     try:
+        if physics:
+            await asyncio.to_thread(physics.stop)
         info = await asyncio.to_thread(
             renderer.load_scene,
             path,
@@ -234,6 +241,56 @@ async def get_selected():
     if not renderer or not renderer.has_scene:
         return {"selected": None}
     return {"selected": renderer.get_selected()}
+
+
+@app.get("/api/physics/status")
+async def physics_status():
+    if not physics:
+        raise HTTPException(status_code=503, detail="Physics controller not ready")
+    return physics.status()
+
+
+@app.post("/api/physics/initialize")
+async def initialize_physics():
+    if not renderer or not renderer.has_scene or not renderer.scene_path:
+        raise HTTPException(status_code=503, detail="Load a scene before initializing physics")
+    if not physics:
+        raise HTTPException(status_code=503, detail="Physics controller not ready")
+    try:
+        body_paths = await asyncio.to_thread(renderer.list_rigid_bodies)
+        return await asyncio.to_thread(physics.start, renderer.scene_path, body_paths)
+    except Exception as exc:
+        logger.exception("Failed to initialize physics")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+async def run_physics_command(command: str):
+    if not physics:
+        raise HTTPException(status_code=503, detail="Physics controller not ready")
+    try:
+        return await asyncio.to_thread(getattr(physics, command))
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/physics/play")
+async def play_physics():
+    return await run_physics_command("play")
+
+
+@app.post("/api/physics/pause")
+async def pause_physics():
+    return await run_physics_command("pause")
+
+
+@app.post("/api/physics/step")
+async def step_physics():
+    return await run_physics_command("step")
+
+
+@app.post("/api/physics/reset")
+async def reset_physics():
+    return await run_physics_command("reset")
 
 
 @app.post("/api/render/still")

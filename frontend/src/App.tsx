@@ -21,6 +21,8 @@ interface PhysicsStatus {
 
 export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const streamStartingRef = useRef(false);
   const [scenePath, setScenePath] = useState('');
   const [scene, setScene] = useState<SceneInfo | null>(null);
   const [webrtcPort, setWebrtcPort] = useState(49100);
@@ -29,6 +31,8 @@ export default function App() {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [physics, setPhysics] = useState<PhysicsStatus | null>(null);
   const [physicsBusy, setPhysicsBusy] = useState(false);
+  const [sceneBusy, setSceneBusy] = useState(false);
+  const [initializePhysicsOnLoad, setInitializePhysicsOnLoad] = useState(true);
   const [logs, setLogs] = useState<string[]>([]);
   const disconnectRef = useRef<(() => void) | null>(null);
   const mouseRef = useRef<{ down: boolean; button: number; x: number; y: number; moved: boolean }>({
@@ -70,26 +74,55 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, []);
 
-  const loadScene = async () => {
-    if (!scenePath) return;
+  const loadScene = async (path = scenePath) => {
+    const requestedPath = path.trim();
+    if (!requestedPath) return;
+    setSceneBusy(true);
     try {
       const res = await fetch(`${API_BASE}/scene/load`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: scenePath }),
+        body: JSON.stringify({ path: requestedPath }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Load failed');
+      setScenePath(data.scene);
       setScene({ loaded: true, scene: data.scene, camera: data.camera, render_product: data.render_product });
       setPhysics(null);
       log(`Loaded ${data.scene} with ${data.prim_count} prims`);
+      await startStream();
+      if (initializePhysicsOnLoad) {
+        await runPhysics('initialize');
+      }
     } catch (err) {
       log(`Load error: ${String(err)}`);
+    } finally {
+      setSceneBusy(false);
+    }
+  };
+
+  const uploadAndLoadScene = async (file: File) => {
+    setSceneBusy(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const response = await fetch(`${API_BASE}/scene/upload`, { method: 'POST', body: formData });
+      const data = await response.json();
+      if (!response.ok || !data.path) throw new Error(data.detail || 'Upload failed');
+      setScenePath(data.path);
+      log(`Uploaded ${file.name}`);
+      await loadScene(data.path);
+    } catch (err) {
+      log(`Upload error: ${String(err)}`);
+      setSceneBusy(false);
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
   const startStream = async () => {
-    if (!videoRef.current) return;
+    if (!videoRef.current || connected || streamStartingRef.current) return;
+    streamStartingRef.current = true;
     try {
       const res = await fetch(`${API_BASE}/webrtc/start`, { method: 'POST' });
       const data = await res.json();
@@ -116,6 +149,8 @@ export default function App() {
       setConnected(true);
     } catch (err) {
       log(`Stream error: ${String(err)}`);
+    } finally {
+      streamStartingRef.current = false;
     }
   };
 
@@ -125,6 +160,12 @@ export default function App() {
     setConnected(false);
     log('WebRTC disconnected');
   };
+
+  useEffect(() => {
+    if (scene?.loaded && !connected) {
+      void startStream();
+    }
+  }, [scene?.loaded]);
 
   const renderStill = async () => {
     try {
@@ -278,9 +319,31 @@ export default function App() {
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setScenePath(e.target.value)}
             placeholder="C:/path/to/scene.usda"
           />
-          <button onClick={loadScene} disabled={!scenePath}>
-            Load Scene
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".usd,.usda,.usdc,.usdz"
+            hidden
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void uploadAndLoadScene(file);
+            }}
+          />
+          <button onClick={() => fileInputRef.current?.click()} disabled={sceneBusy}>
+            Browse...
           </button>
+          <button onClick={() => void loadScene()} disabled={!scenePath || sceneBusy}>
+            {sceneBusy ? 'Loading...' : 'Load Scene'}
+          </button>
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={initializePhysicsOnLoad}
+              onChange={(event) => setInitializePhysicsOnLoad(event.target.checked)}
+            />
+            Initialize physics after load
+          </label>
+          <div className="hint">Streaming starts automatically. Physics remains paused.</div>
         </div>
 
         <div className="group">

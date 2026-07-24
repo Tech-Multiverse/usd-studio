@@ -82,6 +82,23 @@ label {
   color: #9ca3af;
 }
 
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+}
+
+.checkbox-label input {
+  margin: 0;
+}
+
+.hint {
+  color: #6b7280;
+  font-size: 0.75rem;
+  margin-top: 0.25rem;
+}
+
 .group {
   margin-bottom: 1rem;
   padding-bottom: 1rem;

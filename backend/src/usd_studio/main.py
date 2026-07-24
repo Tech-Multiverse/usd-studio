@@ -153,7 +153,10 @@ async def upload_scene(file: UploadFile = File(...)):
         raise HTTPException(status_code=503, detail="Renderer not ready")
     uploads = Path(settings.uploads_dir)
     uploads.mkdir(parents=True, exist_ok=True)
-    dest = uploads / (file.filename or "scene.usda")
+    filename = Path(file.filename or "scene.usda").name
+    if Path(filename).suffix.lower() not in {".usd", ".usda", ".usdc", ".usdz"}:
+        raise HTTPException(status_code=400, detail="Choose a .usd, .usda, .usdc, or .usdz file")
+    dest = uploads / filename
     try:
         with open(dest, "wb") as f:
             while True:

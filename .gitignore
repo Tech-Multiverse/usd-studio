@@ -11,10 +11,14 @@ __pycache__/
 # Node
 node_modules/
 frontend/dist/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
 *.log
 
 # Outputs / runtime
 outputs/
+backend/uploads/
 *.mp4
 *.jpg
 backend/*.dmp.zip

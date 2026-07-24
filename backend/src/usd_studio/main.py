@@ -37,6 +37,29 @@ class CameraOrbitRequest(BaseModel):
     pitch: float = 0.3
 
 
+class CameraOrbitDeltaRequest(BaseModel):
+    delta_yaw: float
+    delta_pitch: float
+
+
+class CameraPanRequest(BaseModel):
+    dx: float
+    dy: float
+
+
+class CameraZoomRequest(BaseModel):
+    delta: float
+
+
+class PickRequest(BaseModel):
+    x: float
+    y: float
+
+
+class SelectRequest(BaseModel):
+    path: Optional[str] = None
+
+
 class StillRenderRequest(BaseModel):
     filename: str = "still.png"
     quality: int = 95
@@ -164,6 +187,53 @@ async def orbit_camera(req: CameraOrbitRequest):
         req.pitch,
     )
     return {"ok": True}
+
+
+@app.post("/api/camera/orbit/delta")
+async def orbit_camera_delta(req: CameraOrbitDeltaRequest):
+    if not renderer or not renderer.has_scene:
+        raise HTTPException(status_code=503, detail="No scene loaded")
+    await asyncio.to_thread(renderer.orbit_delta, req.delta_yaw, req.delta_pitch)
+    return {"ok": True}
+
+
+@app.post("/api/camera/pan")
+async def pan_camera(req: CameraPanRequest):
+    if not renderer or not renderer.has_scene:
+        raise HTTPException(status_code=503, detail="No scene loaded")
+    await asyncio.to_thread(renderer.pan_delta, req.dx, req.dy)
+    return {"ok": True}
+
+
+@app.post("/api/camera/zoom")
+async def zoom_camera(req: CameraZoomRequest):
+    if not renderer or not renderer.has_scene:
+        raise HTTPException(status_code=503, detail="No scene loaded")
+    await asyncio.to_thread(renderer.zoom_delta, req.delta)
+    return {"ok": True}
+
+
+@app.post("/api/pick")
+async def pick_prim(req: PickRequest):
+    if not renderer or not renderer.has_scene:
+        raise HTTPException(status_code=503, detail="No scene loaded")
+    path = await asyncio.to_thread(renderer.pick, req.x, req.y)
+    return {"path": path}
+
+
+@app.post("/api/select")
+async def select_prim(req: SelectRequest):
+    if not renderer or not renderer.has_scene:
+        raise HTTPException(status_code=503, detail="No scene loaded")
+    selected = await asyncio.to_thread(renderer.select, req.path)
+    return {"selected": selected}
+
+
+@app.get("/api/selected")
+async def get_selected():
+    if not renderer or not renderer.has_scene:
+        return {"selected": None}
+    return {"selected": renderer.get_selected()}
 
 
 @app.post("/api/render/still")

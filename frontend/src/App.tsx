@@ -17,8 +17,16 @@ export default function App() {
   const [webrtcPort, setWebrtcPort] = useState(49100);
   const [connected, setConnected] = useState(false);
   const [streamSize, setStreamSize] = useState({ width: 1280, height: 720 });
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const disconnectRef = useRef<(() => void) | null>(null);
+  const mouseRef = useRef<{ down: boolean; button: number; x: number; y: number; moved: boolean }>({
+    down: false,
+    button: 0,
+    x: 0,
+    y: 0,
+    moved: false,
+  });
 
   const log = (msg: string) => {
     console.log(msg);
@@ -109,6 +117,115 @@ export default function App() {
     }
   };
 
+  const postCamera = async (endpoint: string, body: unknown) => {
+    try {
+      const res = await fetch(`${API_BASE}/camera/${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error((await res.json()).detail || 'Camera command failed');
+    } catch (err) {
+      console.warn(`Camera ${endpoint} failed:`, err);
+    }
+  };
+
+  const postPick = async (x: number, y: number) => {
+    try {
+      const res = await fetch(`${API_BASE}/pick`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ x, y }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Pick failed');
+      const path = data.path || null;
+      setSelectedPath(path);
+      log(path ? `Picked: ${path}` : 'Picked: nothing');
+      // Highlight on backend.
+      await fetch(`${API_BASE}/select`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+    } catch (err) {
+      console.warn('Pick failed:', err);
+    }
+  };
+
+  const handleMouseDown = (e: React.MouseEvent<HTMLVideoElement>) => {
+    if (!connected) return;
+    mouseRef.current = {
+      down: true,
+      button: e.button,
+      x: e.clientX,
+      y: e.clientY,
+      moved: false,
+    };
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLVideoElement>) => {
+    if (!connected || !mouseRef.current.down) return;
+    const dx = e.clientX - mouseRef.current.x;
+    const dy = e.clientY - mouseRef.current.y;
+    if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return;
+    mouseRef.current.x = e.clientX;
+    mouseRef.current.y = e.clientY;
+    mouseRef.current.moved = true;
+
+    const video = videoRef.current;
+    if (!video) return;
+    const rect = video.getBoundingClientRect();
+    const ndx = dx / rect.width;
+    const ndy = dy / rect.height;
+
+    if (mouseRef.current.button === 0) {
+      // Left drag: orbit.
+      void postCamera('orbit/delta', {
+        delta_yaw: -ndx * 3.0,
+        delta_pitch: -ndy * 3.0,
+      });
+    } else if (mouseRef.current.button === 2) {
+      // Right drag: pan.
+      void postCamera('pan', { dx: ndx, dy: -ndy });
+    }
+  };
+
+  const handleMouseUp = (e: React.MouseEvent<HTMLVideoElement>) => {
+    if (!connected || !mouseRef.current.down) return;
+    const wasMoved = mouseRef.current.moved;
+    mouseRef.current.down = false;
+    if (wasMoved) return;
+
+    // Click without drag: pick/select.
+    const video = videoRef.current;
+    if (!video) return;
+    const rect = video.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    void postPick(x, y);
+  };
+
+  const handleWheelNative = (e: WheelEvent) => {
+    if (!connected) return;
+    e.preventDefault();
+    void postCamera('zoom', { delta: e.deltaY * 0.002 });
+  };
+
+  const handleContextMenu = (e: React.MouseEvent<HTMLVideoElement>) => {
+    e.preventDefault();
+  };
+
+  // Attach native wheel listener so we can call preventDefault (passive: false).
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.addEventListener('wheel', handleWheelNative, { passive: false });
+    return () => {
+      video.removeEventListener('wheel', handleWheelNative);
+    };
+  }, [connected]);
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -137,10 +254,25 @@ export default function App() {
                 Camera: {scene.camera}
                 <br />
                 Product: {scene.render_product}
+                <br />
+                Selected: {selectedPath || 'none'}
               </>
             ) : (
               <span className="error">No scene loaded</span>
             )}
+          </div>
+        </div>
+
+        <div className="group">
+          <label>Controls (while streaming)</label>
+          <div className="status">
+            Left drag: orbit
+            <br />
+            Right drag: pan
+            <br />
+            Scroll: zoom
+            <br />
+            Click: select prim
           </div>
         </div>
 
@@ -176,7 +308,20 @@ export default function App() {
       </aside>
 
       <main className="viewport">
-        <video id="remote-video" ref={videoRef} width={streamSize.width} height={streamSize.height} autoPlay playsInline tabIndex={-1} />
+        <video
+          id="remote-video"
+          ref={videoRef}
+          width={streamSize.width}
+          height={streamSize.height}
+          autoPlay
+          playsInline
+          tabIndex={-1}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={() => { mouseRef.current.down = false; }}
+          onContextMenu={handleContextMenu}
+        />
         {!connected && <div className="status">Stream not connected</div>}
       </main>
     </div>

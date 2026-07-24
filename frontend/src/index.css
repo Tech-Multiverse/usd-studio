@@ -45,6 +45,7 @@ video {
   border: 1px solid #2a2e36;
   border-radius: 6px;
   background: #000;
+  cursor: crosshair;
 }
 
 button {

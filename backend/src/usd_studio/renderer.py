@@ -34,6 +34,13 @@ class StudioRenderer:
         self.has_scene = False
         self._lock = threading.Lock()
 
+        # Camera orbit state; updated by mouse interactions.
+        self._camera_center = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        self._camera_radius = 1.5
+        self._camera_yaw = math.radians(45.0)
+        self._camera_pitch = math.radians(30.0)
+        self._selected_path: Optional[str] = None
+
         config = ovrtx.RendererConfig(
             selection_outline_enabled=True,
             log_file_path="ovrtx-studio.log",
@@ -85,11 +92,12 @@ class StudioRenderer:
                 return path
         return paths[0]
 
-    def _frame_camera_to_scene(self) -> None:
-        """Position the current camera to frame the scene bounding box.
+    def _scene_bounds(self) -> tuple[Optional[np.ndarray], Optional[float]]:
+        """Compute the world-space bounding box of renderable scene prims.
 
         Filters out lights, cameras, render settings, and prims with non-finite
         or grossly large authored extents (e.g. ground planes).
+        Returns (center, radius) or (None, None) on failure.
         """
         try:
             prims = self._renderer.query_prims(
@@ -97,18 +105,21 @@ class StudioRenderer:
                 attribute_filter_mode=ovrtx.AttributeFilterMode.NONE,
             )
             if not prims:
-                logger.warning("No prims with extent found; cannot auto-frame")
-                return
+                return None, None
 
-            # Collect per-prim world-space bounding boxes, skipping known
-            # non-renderable or unbounded prims.
-            skip_tokens = {"light", "camera", "render", "studio", "looks", "material"}
+            skip_tokens = {
+                "light", "camera", "render", "studio", "looks", "material",
+                "ground", "plane", "collision", "physics",
+            }
             candidates = []
             for path in prims:
                 lower = path.lower()
                 if any(tok in lower for tok in skip_tokens):
                     continue
                 if not lower.startswith("/world"):
+                    continue
+                # Skip root scene xforms that aggregate child extents (e.g. /World).
+                if path == "/World":
                     continue
                 try:
                     xform_tensor = self._renderer.read_attribute("omni:xform", [path])
@@ -131,11 +142,8 @@ class StudioRenderer:
                     continue
 
             if not candidates:
-                logger.warning("No finite renderable prims found; cannot auto-frame")
-                return
+                return None, None
 
-            # Reject outliers whose diagonal is more than 10x the median diagonal.
-            # This drops huge ground planes while keeping the actual model.
             diagonals = sorted(c[4] for c in candidates)
             median_diag = diagonals[len(diagonals) // 2]
             max_allowed = max(median_diag * 10.0, median_diag + 1.0)
@@ -162,22 +170,40 @@ class StudioRenderer:
                 included += 1
 
             if not np.isfinite(world_min).all() or not np.isfinite(world_max).all():
-                logger.warning("Could not compute scene bounds")
-                return
+                return None, None
 
             center = (world_min + world_max) * 0.5
             size = world_max - world_min
             radius = float(np.linalg.norm(size) * 0.5)
             if radius <= 0 or not np.isfinite(radius):
                 radius = 1.0
+            return center, radius
+
+        except Exception as exc:
+            logger.warning("Scene bounds computation failed: %s", exc)
+            return None, None
+
+    def _init_camera_state_from_scene(self, auto_frame: bool) -> None:
+        """Compute scene bounds and initialize orbit state; optionally frame a Studio camera."""
+        try:
+            center, radius = self._scene_bounds()
+            if center is None or radius is None:
+                logger.warning("Could not compute scene bounds; using defaults")
+                return
 
             distance = max(radius * 2.5, 0.001)
-            yaw = math.radians(45)
-            pitch = math.radians(30)
-            self.orbit_camera(center, distance, yaw, pitch)
-            logger.info("Camera framed to %d prims: center=%s radius=%.4f", included, center, radius)
+            self._camera_center = center
+            self._camera_radius = distance
+            self._camera_yaw = math.radians(45)
+            self._camera_pitch = math.radians(30)
+
+            if auto_frame and self.camera_path and self.camera_path.startswith("/Studio/"):
+                self.orbit_camera(center, distance, self._camera_yaw, self._camera_pitch)
+                logger.info("Camera framed to scene: center=%s radius=%.4f", center, radius)
+            else:
+                logger.info("Camera orbit state initialized from scene bounds: radius=%.4f", distance)
         except Exception as exc:
-            logger.warning("Auto-frame failed: %s", exc)
+            logger.warning("Camera state init failed: %s", exc)
 
     def load_scene(
         self,
@@ -229,9 +255,9 @@ class StudioRenderer:
                 self.has_scene = False
                 raise RuntimeError("No render product available after scene load")
 
-            # If we injected a camera, frame it on the scene bounds.
-            if auto_frame and self.camera_path and self.camera_path.startswith("/Studio/"):
-                self._frame_camera_to_scene()
+            # Always compute scene bounds; they initialize the camera orbit state
+            # used by mouse interactions even when the scene camera is kept as-is.
+            self._init_camera_state_from_scene(auto_frame=auto_frame)
 
             prims = self._renderer.query_prims(attribute_filter_mode=ovrtx.AttributeFilterMode.NONE)
             return {
@@ -289,8 +315,11 @@ class StudioRenderer:
             return np.from_dlpack(tensor).reshape(4, 4).copy()
 
     def orbit_camera(self, center: np.ndarray, radius: float, yaw: float, pitch: float) -> None:
-        """Position the camera orbiting a center point."""
-        pitch = max(-math.radians(89), min(math.radians(89), pitch))
+        """Position the camera orbiting a center point and store the orbit state."""
+        self._camera_center = np.asarray(center, dtype=np.float64).copy()
+        self._camera_radius = max(radius, 0.001)
+        self._camera_yaw = yaw
+        self._camera_pitch = max(-math.radians(89), min(math.radians(89), pitch))
         eye = center + np.array([
             radius * math.cos(pitch) * math.cos(yaw),
             radius * math.cos(pitch) * math.sin(yaw),
@@ -325,6 +354,161 @@ class StudioRenderer:
                 attribute_filter_mode=ovrtx.AttributeFilterMode.NONE,
             )
             return list(products.keys())
+
+    def _camera_basis(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return (eye, forward, right, up) from the current camera transform."""
+        matrix = self.get_camera_transform()
+        eye = matrix[:3, 3].copy()
+        forward = -matrix[2, :3].copy()
+        right = matrix[0, :3].copy()
+        up = matrix[1, :3].copy()
+        return eye, forward, right, up
+
+    def _look_at(self, eye: np.ndarray, target: np.ndarray, world_up: np.ndarray) -> np.ndarray:
+        """Build a 4x4 row-major camera transform looking from eye to target."""
+        forward = target - eye
+        forward /= np.linalg.norm(forward)
+        right = np.cross(forward, world_up)
+        norm = np.linalg.norm(right)
+        if norm < 1e-6:
+            right = np.cross(forward, np.array([0.0, 1.0, 0.0]))
+            norm = np.linalg.norm(right)
+        right /= norm
+        up = np.cross(right, forward)
+
+        matrix = np.eye(4, dtype=np.float64)
+        matrix[0, :3] = right
+        matrix[1, :3] = up
+        matrix[2, :3] = -forward
+        matrix[:3, 3] = eye
+        return matrix
+
+    def get_camera_state(self) -> dict:
+        return {
+            "center": self._camera_center.tolist(),
+            "radius": self._camera_radius,
+            "yaw": self._camera_yaw,
+            "pitch": self._camera_pitch,
+        }
+
+    def orbit_delta(self, delta_yaw: float, delta_pitch: float) -> None:
+        """Orbit the camera around a pivot point in front of it (left-drag)."""
+        with self._lock:
+            eye, forward, right, _up = self._camera_basis()
+            # Use a focus distance tied to the current orbit radius so orbit feels
+            # natural regardless of scene scale.
+            focus = self._camera_radius
+            pivot = eye + forward * focus
+
+            # Pitch rotation around camera right axis.
+            cos_p = math.cos(delta_pitch)
+            sin_p = math.sin(delta_pitch)
+            offset = eye - pivot
+            pitch_axis = right
+            offset = (
+                offset * cos_p
+                + np.cross(pitch_axis, offset) * sin_p
+                + pitch_axis * np.dot(pitch_axis, offset) * (1 - cos_p)
+            )
+            # Yaw rotation around world up.
+            cos_y = math.cos(delta_yaw)
+            sin_y = math.sin(delta_yaw)
+            world_up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            offset = (
+                offset * cos_y
+                + np.cross(world_up, offset) * sin_y
+                + world_up * np.dot(world_up, offset) * (1 - cos_y)
+            )
+            new_eye = pivot + offset
+            matrix = self._look_at(new_eye, pivot, world_up)
+            self.set_camera_transform(matrix)
+
+    def pan_delta(self, dx: float, dy: float) -> None:
+        """Pan the camera in its view plane (right-drag).
+
+        dx/dy are normalized viewport coordinates (-1..1) in screen space.
+        """
+        with self._lock:
+            eye, _forward, right, up = self._camera_basis()
+            scale = self._camera_radius * 0.75
+            delta = (right * dx + up * dy) * scale
+            self._camera_center += delta
+            # Pan both eye and pivot so orbit continues from the same relative point.
+            eye += delta
+            matrix = self.get_camera_transform()
+            matrix[:3, 3] = eye
+            self.set_camera_transform(matrix)
+
+    def zoom_delta(self, delta: float) -> None:
+        """Dolly the camera forward/backward (mouse wheel)."""
+        with self._lock:
+            eye, forward, _right, _up = self._camera_basis()
+            # Move eye along forward direction, scaled by radius.
+            scale = self._camera_radius * delta
+            new_eye = eye + forward * scale
+            # Keep looking at the same pivot point so the view doesn't drift.
+            pivot = eye + forward * self._camera_radius
+            world_up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            matrix = self._look_at(new_eye, pivot, world_up)
+            self.set_camera_transform(matrix)
+
+    def pick(self, nx: float, ny: float) -> Optional[str]:
+        """Pick the prim at normalized viewport coordinates (0..1, 0..1).
+
+        (0,0) is the top-left of the image, matching mouse events and the
+        render buffer row order.
+        """
+        x = int(nx * self.width)
+        y = int(ny * self.height)
+        with self._lock:
+            self._renderer.enqueue_pick_query(
+                render_product_path=self.render_product,
+                left=x,
+                top=y,
+                right=x + 1,
+                bottom=y + 1,
+            )
+            products = self._renderer.step(
+                render_products={self.render_product},
+                delta_time=1.0 / 60.0,
+            )
+            frame = products[self.render_product].frames[0]
+            pick_var = frame.render_vars[ovrtx.OVRTX_RENDER_VAR_PICK_HIT]
+            mapping = pick_var.map(device=ovrtx.Device.CPU)
+            try:
+                hit_count = int(
+                    np.from_dlpack(mapping.params["hitCount"]).reshape(-1)[0]
+                )
+                if hit_count == 0:
+                    return None
+                prim_paths = np.from_dlpack(mapping["primPath"]).copy().reshape(-1)
+                path_id = int(prim_paths[0])
+                path = self._renderer.resolve_prim_path_id(path_id)
+                return path if path else None
+            finally:
+                mapping.unmap()
+
+    def select(self, prim_path: Optional[str]) -> Optional[str]:
+        """Highlight a prim with the selection outline and return it."""
+        with self._lock:
+            if self._selected_path:
+                self._renderer.write_attribute(
+                    prim_paths=[self._selected_path],
+                    attribute_name=ovrtx.OVRTX_ATTR_NAME_SELECTION_OUTLINE_GROUP,
+                    tensor=np.array([0], dtype=np.uint8),
+                )
+            self._selected_path = prim_path
+            if prim_path:
+                self._renderer.write_attribute(
+                    prim_paths=[prim_path],
+                    attribute_name=ovrtx.OVRTX_ATTR_NAME_SELECTION_OUTLINE_GROUP,
+                    tensor=np.array([1], dtype=np.uint8),
+                )
+        logger.info("Selected: %s", prim_path)
+        return prim_path
+
+    def get_selected(self) -> Optional[str]:
+        return self._selected_path
 
     def close(self) -> None:
         with self._lock:

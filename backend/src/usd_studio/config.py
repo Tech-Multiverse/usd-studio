@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     data_dir: str = "./data"
     outputs_dir: str = "../outputs"
     uploads_dir: str = "./uploads"
+    max_package_files: int = 20000
+    max_package_upload_bytes: int = 2 * 1024 * 1024 * 1024
+    max_package_expanded_bytes: int = 5 * 1024 * 1024 * 1024
     default_scene: str = ""
 
     class Config:

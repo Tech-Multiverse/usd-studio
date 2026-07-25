@@ -1,13 +1,15 @@
 """FastAPI application for USD Studio."""
 
 import asyncio
+import json
 import logging
+import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -15,6 +17,14 @@ from pydantic import BaseModel
 from .config import settings
 from .physics import PhysicsController
 from .renderer import StudioRenderer
+from .scene_packages import (
+    USD_EXTENSIONS,
+    choose_root_scene,
+    create_package_directory,
+    extract_zip_package,
+    find_scene_files,
+    safe_relative_path,
+)
 from .streamer import WebRTCStreamer
 
 logger = logging.getLogger(__name__)
@@ -147,26 +157,117 @@ async def load_scene(req: LoadSceneRequest):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+async def write_upload(file: UploadFile, destination: Path, max_bytes: int) -> int:
+    total = 0
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("wb") as target:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError("Upload exceeds the configured size limit")
+            target.write(chunk)
+    return total
+
+
+def package_response(directory: Path, preferred_name: str) -> dict:
+    scenes = find_scene_files(directory)
+    root_scene = choose_root_scene(scenes, preferred_name)
+    return {
+        "path": str(root_scene),
+        "scenes": [str(scene) for scene in scenes],
+        "package": str(directory.resolve()),
+    }
+
+
 @app.post("/api/scene/upload")
 async def upload_scene(file: UploadFile = File(...)):
     if not renderer:
         raise HTTPException(status_code=503, detail="Renderer not ready")
-    uploads = Path(settings.uploads_dir)
-    uploads.mkdir(parents=True, exist_ok=True)
     filename = Path(file.filename or "scene.usda").name
-    if Path(filename).suffix.lower() not in {".usd", ".usda", ".usdc", ".usdz"}:
+    if Path(filename).suffix.lower() not in USD_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Choose a .usd, .usda, .usdc, or .usdz file")
-    dest = uploads / filename
+    package_dir = create_package_directory(Path(settings.uploads_dir), filename)
     try:
-        with open(dest, "wb") as f:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                f.write(chunk)
+        destination = package_dir / filename
+        await write_upload(file, destination, settings.max_package_upload_bytes)
+        return package_response(package_dir, filename)
+    except ValueError as exc:
+        shutil.rmtree(package_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
+        shutil.rmtree(package_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return {"path": str(dest.resolve())}
+
+
+@app.post("/api/scene/package/archive")
+async def upload_scene_archive(file: UploadFile = File(...)):
+    if not renderer:
+        raise HTTPException(status_code=503, detail="Renderer not ready")
+    filename = Path(file.filename or "scene.zip").name
+    if Path(filename).suffix.lower() != ".zip":
+        raise HTTPException(status_code=400, detail="Choose a .zip scene package")
+    package_dir = create_package_directory(Path(settings.uploads_dir), filename)
+    archive_path = package_dir / filename
+    try:
+        await write_upload(file, archive_path, settings.max_package_upload_bytes)
+        await asyncio.to_thread(
+            extract_zip_package,
+            archive_path,
+            package_dir,
+            settings.max_package_files,
+            settings.max_package_expanded_bytes,
+        )
+        archive_path.unlink(missing_ok=True)
+        return package_response(package_dir, filename)
+    except ValueError as exc:
+        shutil.rmtree(package_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        shutil.rmtree(package_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/scene/package/folder")
+async def upload_scene_folder(
+    files: list[UploadFile] = File(...),
+    relative_paths_json: str = Form(...),
+):
+    if not renderer:
+        raise HTTPException(status_code=503, detail="Renderer not ready")
+    try:
+        relative_paths = json.loads(relative_paths_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid folder manifest") from exc
+    if not isinstance(relative_paths, list) or len(relative_paths) != len(files):
+        raise HTTPException(status_code=400, detail="Folder manifest does not match uploaded files")
+    if not files or len(files) > settings.max_package_files:
+        raise HTTPException(status_code=400, detail=f"Choose a folder with at most {settings.max_package_files} files")
+    package_name = str(relative_paths[0]).replace("\\", "/").split("/", 1)[0]
+    package_dir = create_package_directory(Path(settings.uploads_dir), package_name)
+    try:
+        destinations: set[Path] = set()
+        total = 0
+        for file, relative_value in zip(files, relative_paths):
+            relative_path = safe_relative_path(str(relative_value))
+            destination = (package_dir / relative_path).resolve()
+            if package_dir.resolve() not in destination.parents or destination in destinations:
+                raise ValueError(f"Invalid or duplicate package path: {relative_value}")
+            destinations.add(destination)
+            total += await write_upload(
+                file,
+                destination,
+                settings.max_package_upload_bytes - total,
+            )
+        return package_response(package_dir, package_name)
+    except ValueError as exc:
+        shutil.rmtree(package_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        shutil.rmtree(package_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/cameras")

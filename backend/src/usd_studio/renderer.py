@@ -4,6 +4,7 @@ import logging
 import math
 import tempfile
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -279,8 +280,12 @@ class StudioRenderer:
             )
             frame = products[self.render_product].frames[0]
             mapping = frame.render_vars["LdrColor"].map(device=ovrtx.Device.CPU)
-            return np.from_dlpack(mapping)
+            try:
+                return np.from_dlpack(mapping).copy()
+            finally:
+                mapping.unmap()
 
+    @contextmanager
     def render_frame_cuda(self):
         """Render one frame and return the mapped CUDA tensor (context manager)."""
         with self._lock:
@@ -289,7 +294,11 @@ class StudioRenderer:
                 delta_time=1.0 / 60.0,
             )
             frame = products[self.render_product].frames[0]
-            return frame.render_vars["LdrColor"].map(device=ovrtx.Device.CUDA)
+            mapping = frame.render_vars["LdrColor"].map(device=ovrtx.Device.CUDA)
+            try:
+                yield mapping
+            finally:
+                mapping.unmap()
 
     def save_still(self, output_path: Path, quality: int = 95) -> Path:
         """Render and save a still image."""

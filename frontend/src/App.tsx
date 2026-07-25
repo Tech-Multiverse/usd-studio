@@ -19,9 +19,18 @@ interface PhysicsStatus {
   error?: string | null;
 }
 
+interface PackageUpload {
+  path: string;
+  scenes?: string[];
+  package?: string;
+  detail?: string;
+}
+
 export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const archiveInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const streamStartingRef = useRef(false);
   const [scenePath, setScenePath] = useState('');
   const [scene, setScene] = useState<SceneInfo | null>(null);
@@ -32,6 +41,7 @@ export default function App() {
   const [physics, setPhysics] = useState<PhysicsStatus | null>(null);
   const [physicsBusy, setPhysicsBusy] = useState(false);
   const [sceneBusy, setSceneBusy] = useState(false);
+  const [packageScenes, setPackageScenes] = useState<string[]>([]);
   const [initializePhysicsOnLoad, setInitializePhysicsOnLoad] = useState(true);
   const [logs, setLogs] = useState<string[]>([]);
   const disconnectRef = useRef<(() => void) | null>(null);
@@ -47,6 +57,10 @@ export default function App() {
     console.log(msg);
     setLogs((prev: string[]) => [msg, ...prev].slice(0, 50));
   };
+
+  useEffect(() => {
+    folderInputRef.current?.setAttribute('webkitdirectory', '');
+  }, []);
 
   useEffect(() => {
     fetch(`${API_BASE}/health`)
@@ -101,22 +115,54 @@ export default function App() {
     }
   };
 
+  const finishPackageUpload = async (data: PackageUpload, label: string) => {
+    if (!data.path) throw new Error(data.detail || 'Upload failed');
+    const scenes = data.scenes ?? [data.path];
+    setPackageScenes(scenes);
+    setScenePath(data.path);
+    log(`Uploaded ${label}; found ${scenes.length} USD scene${scenes.length === 1 ? '' : 's'}`);
+    await loadScene(data.path);
+  };
+
   const uploadAndLoadScene = async (file: File) => {
     setSceneBusy(true);
     try {
       const formData = new FormData();
       formData.append('file', file);
-      const response = await fetch(`${API_BASE}/scene/upload`, { method: 'POST', body: formData });
-      const data = await response.json();
-      if (!response.ok || !data.path) throw new Error(data.detail || 'Upload failed');
-      setScenePath(data.path);
-      log(`Uploaded ${file.name}`);
-      await loadScene(data.path);
+      const endpoint = file.name.toLowerCase().endsWith('.zip')
+        ? `${API_BASE}/scene/package/archive`
+        : `${API_BASE}/scene/upload`;
+      const response = await fetch(endpoint, { method: 'POST', body: formData });
+      const data: PackageUpload = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Upload failed');
+      await finishPackageUpload(data, file.name);
     } catch (err) {
       log(`Upload error: ${String(err)}`);
       setSceneBusy(false);
     } finally {
       if (fileInputRef.current) fileInputRef.current.value = '';
+      if (archiveInputRef.current) archiveInputRef.current.value = '';
+    }
+  };
+
+  const uploadAndLoadFolder = async (fileList: FileList) => {
+    const files = Array.from(fileList);
+    if (!files.length) return;
+    setSceneBusy(true);
+    try {
+      const relativePaths = files.map((file) => file.webkitRelativePath || file.name);
+      const formData = new FormData();
+      files.forEach((file) => formData.append('files', file));
+      formData.append('relative_paths_json', JSON.stringify(relativePaths));
+      const response = await fetch(`${API_BASE}/scene/package/folder`, { method: 'POST', body: formData });
+      const data: PackageUpload = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Folder upload failed');
+      await finishPackageUpload(data, relativePaths[0].split('/')[0]);
+    } catch (err) {
+      log(`Folder upload error: ${String(err)}`);
+      setSceneBusy(false);
+    } finally {
+      if (folderInputRef.current) folderInputRef.current.value = '';
     }
   };
 
@@ -316,7 +362,10 @@ export default function App() {
           <input
             type="text"
             value={scenePath}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setScenePath(e.target.value)}
+            onChange={(event: React.ChangeEvent<HTMLInputElement>) => {
+              setScenePath(event.target.value);
+              setPackageScenes([]);
+            }}
             placeholder="C:/path/to/scene.usda"
           />
           <input
@@ -329,11 +378,47 @@ export default function App() {
               if (file) void uploadAndLoadScene(file);
             }}
           />
+          <input
+            ref={archiveInputRef}
+            type="file"
+            accept=".zip"
+            hidden
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void uploadAndLoadScene(file);
+            }}
+          />
+          <input
+            ref={folderInputRef}
+            type="file"
+            multiple
+            hidden
+            onChange={(event) => {
+              const files = event.target.files;
+              if (files) void uploadAndLoadFolder(files);
+            }}
+          />
           <button onClick={() => fileInputRef.current?.click()} disabled={sceneBusy}>
-            Browse...
+            Browse USD File
           </button>
+          <button onClick={() => archiveInputRef.current?.click()} disabled={sceneBusy}>
+            Browse ZIP
+          </button>
+          <button onClick={() => folderInputRef.current?.click()} disabled={sceneBusy}>
+            Browse Folder
+          </button>
+          {packageScenes.length > 1 && (
+            <>
+              <label>Package scenes</label>
+              <select value={scenePath} onChange={(event) => setScenePath(event.target.value)}>
+                {packageScenes.map((path) => (
+                  <option key={path} value={path}>{path.split(/[\\/]/).pop()}</option>
+                ))}
+              </select>
+            </>
+          )}
           <button onClick={() => void loadScene()} disabled={!scenePath || sceneBusy}>
-            {sceneBusy ? 'Loading...' : 'Load Scene'}
+            {sceneBusy ? 'Loading...' : 'Load Scene Path'}
           </button>
           <label className="checkbox-label">
             <input

@@ -93,6 +93,16 @@ label {
   margin: 0;
 }
 
+.vector-inputs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.35rem;
+}
+
+.vector-inputs input[type="number"] {
+  min-width: 0;
+}
+
 .hint {
   color: #6b7280;
   font-size: 0.75rem;

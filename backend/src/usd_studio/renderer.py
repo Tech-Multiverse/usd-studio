@@ -386,6 +386,105 @@ class StudioRenderer:
                 paths.append(path)
             return paths
 
+    @staticmethod
+    def _decompose_transform(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        translation = matrix[3, :3].copy()
+        basis = matrix[:3, :3]
+        scale = np.linalg.norm(basis, axis=1)
+        if np.any(scale < 1e-8) or not np.isfinite(scale).all():
+            raise ValueError("Transform has a zero or invalid scale")
+        rotation_rows = basis / scale[:, None]
+        rotation = rotation_rows.T
+        pitch = math.asin(float(np.clip(-rotation[2, 0], -1.0, 1.0)))
+        if abs(math.cos(pitch)) > 1e-6:
+            roll = math.atan2(rotation[2, 1], rotation[2, 2])
+            yaw = math.atan2(rotation[1, 0], rotation[0, 0])
+        else:
+            roll = math.atan2(-rotation[0, 1], rotation[1, 1])
+            yaw = 0.0
+        return translation, np.degrees([roll, pitch, yaw]), scale
+
+    @staticmethod
+    def _compose_transform(translation: np.ndarray, rotation_degrees: np.ndarray, scale: np.ndarray) -> np.ndarray:
+        roll, pitch, yaw = np.radians(rotation_degrees)
+        cx, sx = math.cos(roll), math.sin(roll)
+        cy, sy = math.cos(pitch), math.sin(pitch)
+        cz, sz = math.cos(yaw), math.sin(yaw)
+        rotation = np.array([
+            [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+            [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+            [-sy, cy * sx, cy * cx],
+        ], dtype=np.float64)
+        matrix = np.eye(4, dtype=np.float64)
+        matrix[:3, :3] = np.diag(scale) @ rotation.T
+        matrix[3, :3] = translation
+        return matrix
+
+    def _read_transform(self, path: str) -> np.ndarray:
+        tensor = self._renderer.read_attribute("omni:xform", [path])
+        matrix = np.from_dlpack(tensor).reshape(4, 4).astype(np.float64, copy=True)
+        if not np.isfinite(matrix).all():
+            raise ValueError("Transform contains non-finite values")
+        return matrix
+
+    def is_rigid_body(self, path: str) -> bool:
+        with self._lock:
+            try:
+                enabled = np.from_dlpack(
+                    self._renderer.read_attribute("physics:rigidBodyEnabled", [path])
+                ).reshape(-1)
+                return bool(enabled.size and enabled[0])
+            except Exception:
+                return path in self.list_rigid_bodies()
+
+    def get_selected_transform(self) -> Optional[dict]:
+        with self._lock:
+            path = self._selected_path
+            if not path:
+                return None
+            matrix = self._read_transform(path)
+            translation, rotation, scale = self._decompose_transform(matrix)
+            return {
+                "path": path,
+                "translation": translation.tolist(),
+                "rotation": rotation.tolist(),
+                "scale": scale.tolist(),
+                "rigid_body": self.is_rigid_body(path),
+            }
+
+    def update_selected_transform(self, translation: list[float], rotation: list[float]) -> dict:
+        values = np.asarray([*translation, *rotation], dtype=np.float64)
+        if values.shape != (6,) or not np.isfinite(values).all():
+            raise ValueError("Translation and rotation must each contain three finite values")
+        with self._lock:
+            path = self._selected_path
+            if not path:
+                raise ValueError("Select a prim before editing its transform")
+            current = self._read_transform(path)
+            _, _, scale = self._decompose_transform(current)
+            matrix = self._compose_transform(values[:3], values[3:], scale)
+            self._renderer.write_attribute(
+                prim_paths=[path],
+                attribute_name="omni:xform",
+                tensor=matrix.reshape(1, 4, 4),
+            )
+            parent_path = path.rsplit("/", 1)[0]
+            if parent_path:
+                try:
+                    world_matrix = matrix @ self._read_transform(parent_path)
+                except Exception:
+                    world_matrix = matrix
+            else:
+                world_matrix = matrix
+            return {
+                "path": path,
+                "translation": values[:3].tolist(),
+                "rotation": values[3:].tolist(),
+                "scale": scale.tolist(),
+                "rigid_body": self.is_rigid_body(path),
+                "world_matrix": world_matrix.tolist(),
+            }
+
     def apply_world_poses(self, prims: list[dict]) -> None:
         if not prims:
             return

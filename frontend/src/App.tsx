@@ -19,6 +19,14 @@ interface PhysicsStatus {
   error?: string | null;
 }
 
+interface SelectedTransform {
+  path: string;
+  translation: number[];
+  rotation: number[];
+  scale: number[];
+  rigid_body: boolean;
+}
+
 interface PackageUpload {
   path: string;
   scenes?: string[];
@@ -37,6 +45,10 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [streamSize, setStreamSize] = useState({ width: 1280, height: 720 });
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [selectedTransform, setSelectedTransform] = useState<SelectedTransform | null>(null);
+  const [translation, setTranslation] = useState<string[]>(['0', '0', '0']);
+  const [rotation, setRotation] = useState<string[]>(['0', '0', '0']);
+  const [transformBusy, setTransformBusy] = useState(false);
   const [physics, setPhysics] = useState<PhysicsStatus | null>(null);
   const [physicsBusy, setPhysicsBusy] = useState(false);
   const [sceneBusy, setSceneBusy] = useState(false);
@@ -44,6 +56,10 @@ export default function App() {
   const [initializePhysicsOnLoad, setInitializePhysicsOnLoad] = useState(true);
   const [logs, setLogs] = useState<string[]>([]);
   const disconnectRef = useRef<(() => Promise<void>) | null>(null);
+  const transformTimerRef = useRef<number | null>(null);
+  const transformRequestRef = useRef(0);
+  const translationRef = useRef(translation);
+  const rotationRef = useRef(rotation);
   const mouseRef = useRef<{ down: boolean; button: number; x: number; y: number; moved: boolean }>({
     down: false,
     button: 0,
@@ -59,6 +75,10 @@ export default function App() {
 
   useEffect(() => {
     folderInputRef.current?.setAttribute('webkitdirectory', '');
+  }, []);
+
+  useEffect(() => () => {
+    if (transformTimerRef.current !== null) window.clearTimeout(transformTimerRef.current);
   }, []);
 
   useEffect(() => {
@@ -101,6 +121,8 @@ export default function App() {
       if (!res.ok) throw new Error(data.detail || 'Load failed');
       setScenePath(data.scene);
       setScene({ loaded: true, scene: data.scene, camera: data.camera, render_product: data.render_product });
+      setSelectedPath(null);
+      setSelectedTransform(null);
       setPhysics(null);
       log(`Loaded ${data.scene} with ${data.prim_count} prims`);
       await restartStream();
@@ -285,6 +307,67 @@ export default function App() {
     }
   };
 
+  const loadSelectedTransform = async () => {
+    const response = await fetch(`${API_BASE}/selected/transform`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Unable to inspect selected prim');
+    const selected = data.selected as SelectedTransform | null;
+    setSelectedTransform(selected);
+    if (selected) {
+      const nextTranslation = selected.translation.map((value) => String(value));
+      const nextRotation = selected.rotation.map((value) => String(value));
+      translationRef.current = nextTranslation;
+      rotationRef.current = nextRotation;
+      setTranslation(nextTranslation);
+      setRotation(nextRotation);
+    }
+  };
+
+  const updateSelectedTransform = async (nextTranslation: string[], nextRotation: string[]) => {
+    if ([...nextTranslation, ...nextRotation].some((value) => value.trim() === '')) return;
+    const translationValues = nextTranslation.map(Number);
+    const rotationValues = nextRotation.map(Number);
+    if ([...translationValues, ...rotationValues].some((value) => !Number.isFinite(value))) return;
+    const requestId = ++transformRequestRef.current;
+    setTransformBusy(true);
+    try {
+      const response = await fetch(`${API_BASE}/selected/transform`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ translation: translationValues, rotation: rotationValues }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Transform update failed');
+      if (requestId !== transformRequestRef.current) return;
+      setSelectedTransform(data.selected as SelectedTransform);
+      if (data.physics) setPhysics(data.physics as PhysicsStatus);
+    } catch (err) {
+      if (requestId === transformRequestRef.current) log(`Transform error: ${String(err)}`);
+    } finally {
+      if (requestId === transformRequestRef.current) setTransformBusy(false);
+    }
+  };
+
+  const scheduleTransformUpdate = (nextTranslation: string[], nextRotation: string[]) => {
+    if (transformTimerRef.current !== null) window.clearTimeout(transformTimerRef.current);
+    transformTimerRef.current = window.setTimeout(() => {
+      transformTimerRef.current = null;
+      void updateSelectedTransform(nextTranslation, nextRotation);
+    }, 120);
+  };
+
+  const updateTransformComponent = (kind: 'translation' | 'rotation', index: number, value: string) => {
+    const nextTranslation = [...translationRef.current];
+    const nextRotation = [...rotationRef.current];
+    if (kind === 'translation') nextTranslation[index] = value;
+    else nextRotation[index] = value;
+    translationRef.current = nextTranslation;
+    rotationRef.current = nextRotation;
+    setTranslation(nextTranslation);
+    setRotation(nextRotation);
+    scheduleTransformUpdate(nextTranslation, nextRotation);
+  };
+
   const postPick = async (x: number, y: number) => {
     try {
       const res = await fetch(`${API_BASE}/pick`, {
@@ -295,6 +378,9 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Pick failed');
       const path = data.path || null;
+      if (transformTimerRef.current !== null) window.clearTimeout(transformTimerRef.current);
+      transformRequestRef.current += 1;
+      setTransformBusy(false);
       setSelectedPath(path);
       log(path ? `Picked: ${path}` : 'Picked: nothing');
       // Highlight on backend.
@@ -303,6 +389,11 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path }),
       });
+      if (path) {
+        await loadSelectedTransform();
+      } else {
+        setSelectedTransform(null);
+      }
     } catch (err) {
       console.warn('Pick failed:', err);
     }
@@ -467,6 +558,58 @@ export default function App() {
               <span className="error">No scene loaded</span>
             )}
           </div>
+        </div>
+
+        <div className="group">
+          <label>Selected prim transform</label>
+          {selectedTransform ? (
+            <>
+              <div className="status">
+                {selectedTransform.path}
+                <br />
+                {selectedTransform.rigid_body ? 'Rigid body' : 'Static prim'}
+                <br />
+                Scale: {selectedTransform.scale.map((value) => value.toFixed(3)).join(', ')}
+              </div>
+              <label>Translate</label>
+              <div className="vector-inputs">
+                {translation.map((value, index) => (
+                  <input
+                    key={`translate-${index}`}
+                    type="number"
+                    step="any"
+                    value={value}
+                    aria-label={`Translate ${['X', 'Y', 'Z'][index]}`}
+                    disabled={Boolean(physics?.playing)}
+                    onChange={(event) => updateTransformComponent('translation', index, event.target.value)}
+                  />
+                ))}
+              </div>
+              <label>Rotate (degrees)</label>
+              <div className="vector-inputs">
+                {rotation.map((value, index) => (
+                  <input
+                    key={`rotate-${index}`}
+                    type="number"
+                    step="any"
+                    value={value}
+                    aria-label={`Rotate ${['X', 'Y', 'Z'][index]}`}
+                    disabled={Boolean(physics?.playing)}
+                    onChange={(event) => updateTransformComponent('rotation', index, event.target.value)}
+                  />
+                ))}
+              </div>
+              {selectedTransform.rigid_body && physics?.playing && (
+                <div className="hint">Pause physics before repositioning this rigid body.</div>
+              )}
+              {selectedTransform.rigid_body && physics?.ready && !physics.playing && (
+                <div className="hint">Edits synchronize the paused body. Press Play to release it.</div>
+              )}
+              {transformBusy && <div className="hint">Updating transform...</div>}
+            </>
+          ) : (
+            <div className="status">Click an object in the viewport to inspect it.</div>
+          )}
         </div>
 
         <div className="group">

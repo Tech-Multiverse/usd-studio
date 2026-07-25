@@ -72,6 +72,11 @@ class SelectRequest(BaseModel):
     path: Optional[str] = None
 
 
+class SelectedTransformUpdateRequest(BaseModel):
+    translation: list[float]
+    rotation: list[float]
+
+
 class StillRenderRequest(BaseModel):
     filename: str = "still.png"
     quality: int = 95
@@ -381,6 +386,35 @@ async def get_selected():
     if not renderer or not renderer.has_scene:
         return {"selected": None}
     return {"selected": renderer.get_selected()}
+
+
+@app.get("/api/selected/transform")
+async def get_selected_transform():
+    if not renderer or not renderer.has_scene:
+        raise HTTPException(status_code=503, detail="No scene loaded")
+    try:
+        return {"selected": await asyncio.to_thread(renderer.get_selected_transform)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/selected/transform")
+async def update_selected_transform(req: SelectedTransformUpdateRequest):
+    if not renderer or not renderer.has_scene:
+        raise HTTPException(status_code=503, detail="No scene loaded")
+    status = physics.status() if physics else None
+    if status and status["running"] and not status["ready"]:
+        raise HTTPException(status_code=409, detail="Wait for physics initialization before editing transforms")
+    if status and status["playing"]:
+        raise HTTPException(status_code=409, detail="Pause physics before editing transforms")
+    try:
+        selected = await asyncio.to_thread(renderer.update_selected_transform, req.translation, req.rotation)
+        if selected["rigid_body"] and status and status["ready"]:
+            await asyncio.to_thread(physics.synchronize_pose, selected["path"], selected["world_matrix"])
+        selected.pop("world_matrix", None)
+        return {"selected": selected, "physics": physics.status() if physics else None}
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/physics/status")

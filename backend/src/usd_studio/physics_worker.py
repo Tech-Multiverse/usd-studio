@@ -30,6 +30,43 @@ def pose_matrix(pose: np.ndarray) -> list[list[float]]:
     ]
 
 
+def matrix_pose(matrix4d: list[list[float]]) -> np.ndarray:
+    matrix = np.asarray(matrix4d, dtype=np.float32)
+    if matrix.shape != (4, 4) or not np.isfinite(matrix).all():
+        raise ValueError("Pose matrix must be a finite 4x4 matrix")
+    rotation_rows = matrix[:3, :3]
+    scale = np.linalg.norm(rotation_rows, axis=1)
+    if np.any(scale < 1e-8):
+        raise ValueError("Pose matrix has an invalid scale")
+    rotation = (rotation_rows / scale[:, None]).T
+    trace = float(np.trace(rotation))
+    if trace > 0.0:
+        root = math.sqrt(trace + 1.0) * 2.0
+        w = 0.25 * root
+        x = (rotation[2, 1] - rotation[1, 2]) / root
+        y = (rotation[0, 2] - rotation[2, 0]) / root
+        z = (rotation[1, 0] - rotation[0, 1]) / root
+    elif rotation[0, 0] > rotation[1, 1] and rotation[0, 0] > rotation[2, 2]:
+        root = math.sqrt(1.0 + rotation[0, 0] - rotation[1, 1] - rotation[2, 2]) * 2.0
+        w = (rotation[2, 1] - rotation[1, 2]) / root
+        x = 0.25 * root
+        y = (rotation[0, 1] + rotation[1, 0]) / root
+        z = (rotation[0, 2] + rotation[2, 0]) / root
+    elif rotation[1, 1] > rotation[2, 2]:
+        root = math.sqrt(1.0 + rotation[1, 1] - rotation[0, 0] - rotation[2, 2]) * 2.0
+        w = (rotation[0, 2] - rotation[2, 0]) / root
+        x = (rotation[0, 1] + rotation[1, 0]) / root
+        y = 0.25 * root
+        z = (rotation[1, 2] + rotation[2, 1]) / root
+    else:
+        root = math.sqrt(1.0 + rotation[2, 2] - rotation[0, 0] - rotation[1, 1]) * 2.0
+        w = (rotation[1, 0] - rotation[0, 1]) / root
+        x = (rotation[0, 2] + rotation[2, 0]) / root
+        y = (rotation[1, 2] + rotation[2, 1]) / root
+        z = 0.25 * root
+    return np.array([matrix[3, 0], matrix[3, 1], matrix[3, 2], x, y, z, w], dtype=np.float32)
+
+
 def read_commands(commands: queue.Queue[str]) -> None:
     for line in sys.stdin:
         commands.put(line.strip())
@@ -112,6 +149,23 @@ def main() -> int:
                         ],
                     })
                     emit({"type": "state", "playing": False, "time": sim_time})
+                elif action == "set_pose":
+                    if playing:
+                        raise RuntimeError("Pause physics before setting a rigid-body pose")
+                    path = str(request.get("path", ""))
+                    if path not in body_paths:
+                        raise ValueError(f"Unknown rigid body: {path}")
+                    poses[body_paths.index(path)] = matrix_pose(request.get("matrix4d", []))
+                    binding.write(poses)
+                    binding.read(poses)
+                    emit({
+                        "type": "poses",
+                        "time": sim_time,
+                        "prims": [
+                            {"path": body_path, "matrix4d": pose_matrix(poses[index])}
+                            for index, body_path in enumerate(body_paths)
+                        ],
+                    })
                 elif action == "shutdown":
                     running = False
 

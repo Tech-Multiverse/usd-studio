@@ -112,12 +112,12 @@ class PhysicsController:
         for line in process.stderr:
             logger.info("ovphysx: %s", line.rstrip())
 
-    def _send(self, action: str) -> dict:
+    def _send(self, action: str, **payload: object) -> dict:
         with self._lock:
             process = self._process
             if process is None or process.poll() is not None or process.stdin is None:
                 raise RuntimeError(self._error or "Physics worker is not running")
-            process.stdin.write(json.dumps({"action": action}) + "\n")
+            process.stdin.write(json.dumps({"action": action, **payload}) + "\n")
             process.stdin.flush()
         return self.status()
 
@@ -129,6 +129,14 @@ class PhysicsController:
 
     def step(self) -> dict:
         return self._send("step")
+
+    def synchronize_pose(self, path: str, matrix4d: list[list[float]]) -> dict:
+        with self._lock:
+            if self._playing:
+                raise RuntimeError("Pause physics before repositioning a rigid body")
+            if path not in self._bodies:
+                raise RuntimeError(f"Selected prim is not a physics body: {path}")
+        return self._send("set_pose", path=path, matrix4d=matrix4d)
 
     def reset(self) -> dict:
         with self._lock:

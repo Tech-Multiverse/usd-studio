@@ -25,8 +25,10 @@ class PhysicsController:
         self._playing = False
         self._sim_time = 0.0
         self._error: Optional[str] = None
+        self._initial_poses: list[dict] = []
+        self._reset_poses: list[dict] = []
 
-    def start(self, scene_path: Path, body_paths: list[str]) -> dict:
+    def start(self, scene_path: Path, body_paths: list[str], initial_poses: Optional[list[dict]] = None) -> dict:
         self.stop()
 
         command = [
@@ -60,6 +62,9 @@ class PhysicsController:
             self._playing = False
             self._sim_time = 0.0
             self._error = None
+            if initial_poses is not None:
+                self._reset_poses = list(initial_poses)
+            self._initial_poses = list(self._reset_poses)
 
         self._stdout_thread = threading.Thread(target=self._read_stdout, args=(process,), daemon=True)
         self._stderr_thread = threading.Thread(target=self._read_stderr, args=(process,), daemon=True)
@@ -78,10 +83,14 @@ class PhysicsController:
                 logger.debug("ovphysx: %s", line.rstrip())
                 continue
             message_type = message.get("type")
+            initial_poses: list[dict] = []
+            worker_ready = message_type == "ready"
             with self._lock:
-                if message_type == "ready":
-                    self._ready = True
+                if worker_ready:
+                    self._ready = False
                     self._bodies = list(message.get("bodies", self._bodies))
+                    initial_poses = self._initial_poses
+                    self._initial_poses = []
                 elif message_type == "state":
                     self._playing = bool(message.get("playing"))
                     self._sim_time = float(message.get("time", self._sim_time))
@@ -90,6 +99,15 @@ class PhysicsController:
                 elif message_type == "error":
                     self._error = str(message.get("message", "Physics worker failed"))
                     self._playing = False
+            if initial_poses:
+                try:
+                    self._send("set_poses", prims=initial_poses)
+                except Exception:
+                    logger.exception("Failed to synchronize initial physics poses")
+            if worker_ready:
+                with self._lock:
+                    if self._process is process:
+                        self._ready = True
             if message_type == "poses":
                 try:
                     self._pose_callback(message.get("prims", []))
@@ -122,12 +140,24 @@ class PhysicsController:
         return self.status()
 
     def play(self) -> dict:
+        with self._lock:
+            if not self._ready:
+                raise RuntimeError("Physics has not been initialized")
+            self._playing = True
         return self._send("play")
 
     def pause(self) -> dict:
+        with self._lock:
+            if not self._ready:
+                raise RuntimeError("Physics has not been initialized")
+            self._playing = False
         return self._send("pause")
 
     def step(self) -> dict:
+        with self._lock:
+            if not self._ready:
+                raise RuntimeError("Physics has not been initialized")
+            self._playing = False
         return self._send("step")
 
     def synchronize_pose(self, path: str, matrix4d: list[list[float]]) -> dict:
@@ -136,6 +166,9 @@ class PhysicsController:
                 raise RuntimeError("Pause physics before repositioning a rigid body")
             if path not in self._bodies:
                 raise RuntimeError(f"Selected prim is not a physics body: {path}")
+            self._reset_poses = [item for item in self._reset_poses if item.get("path") != path]
+            self._reset_poses.append({"path": path, "matrix4d": matrix4d})
+        logger.info("Queueing paused physics pose for %s", path)
         return self._send("set_pose", path=path, matrix4d=matrix4d)
 
     def reset(self) -> dict:

@@ -409,7 +409,8 @@ async def update_selected_transform(req: SelectedTransformUpdateRequest):
         raise HTTPException(status_code=409, detail="Pause physics before editing transforms")
     try:
         selected = await asyncio.to_thread(renderer.update_selected_transform, req.translation, req.rotation)
-        if selected["rigid_body"] and status and status["ready"]:
+        if status and status["ready"] and selected["path"] in status["bodies"]:
+            logger.info("Synchronizing edited physics pose for %s", selected["path"])
             await asyncio.to_thread(physics.synchronize_pose, selected["path"], selected["world_matrix"])
         selected.pop("world_matrix", None)
         return {"selected": selected, "physics": physics.status() if physics else None}
@@ -432,7 +433,8 @@ async def initialize_physics():
         raise HTTPException(status_code=503, detail="Physics controller not ready")
     try:
         body_paths = await asyncio.to_thread(renderer.list_rigid_bodies)
-        return await asyncio.to_thread(physics.start, renderer.scene_path, body_paths)
+        initial_poses = await asyncio.to_thread(renderer.get_rigid_body_world_poses, body_paths)
+        return await asyncio.to_thread(physics.start, renderer.scene_path, body_paths, initial_poses)
     except Exception as exc:
         logger.exception("Failed to initialize physics")
         raise HTTPException(status_code=500, detail=str(exc)) from exc

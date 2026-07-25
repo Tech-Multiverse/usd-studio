@@ -27,6 +27,8 @@ interface SelectedTransform {
   rigid_body: boolean;
 }
 
+type TransformTool = 'translate-x' | 'translate-y' | 'translate-z' | 'rotate-x' | 'rotate-y' | 'rotate-z';
+
 interface PackageUpload {
   path: string;
   scenes?: string[];
@@ -49,17 +51,25 @@ export default function App() {
   const [translation, setTranslation] = useState<string[]>(['0', '0', '0']);
   const [rotation, setRotation] = useState<string[]>(['0', '0', '0']);
   const [transformBusy, setTransformBusy] = useState(false);
+  const [activeTransformTool, setActiveTransformTool] = useState<TransformTool | null>(null);
   const [physics, setPhysics] = useState<PhysicsStatus | null>(null);
   const [physicsBusy, setPhysicsBusy] = useState(false);
   const [sceneBusy, setSceneBusy] = useState(false);
   const [packageScenes, setPackageScenes] = useState<string[]>([]);
-  const [initializePhysicsOnLoad, setInitializePhysicsOnLoad] = useState(true);
+  const [initializePhysicsOnLoad, setInitializePhysicsOnLoad] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const disconnectRef = useRef<(() => Promise<void>) | null>(null);
   const transformTimerRef = useRef<number | null>(null);
   const transformRequestRef = useRef(0);
   const translationRef = useRef(translation);
   const rotationRef = useRef(rotation);
+  const transformDragRef = useRef<{
+    tool: TransformTool;
+    x: number;
+    y: number;
+    translation: string[];
+    rotation: string[];
+  } | null>(null);
   const mouseRef = useRef<{ down: boolean; button: number; x: number; y: number; moved: boolean }>({
     down: false,
     button: 0,
@@ -123,6 +133,7 @@ export default function App() {
       setScene({ loaded: true, scene: data.scene, camera: data.camera, render_product: data.render_product });
       setSelectedPath(null);
       setSelectedTransform(null);
+      setActiveTransformTool(null);
       setPhysics(null);
       log(`Loaded ${data.scene} with ${data.prim_count} prims`);
       await restartStream();
@@ -287,6 +298,11 @@ export default function App() {
       if (!response.ok) throw new Error(data.detail || `Physics ${action} failed`);
       setPhysics(data);
       log(`Physics: ${action}`);
+      if (action === 'initialize' || action === 'reset') {
+        void refreshSelectedTransformAfterPhysicsReady();
+      } else if (action === 'pause' || action === 'step') {
+        window.setTimeout(() => void loadSelectedTransform().catch((err) => log(`Transform refresh error: ${String(err)}`)), 100);
+      }
     } catch (err) {
       log(`Physics error: ${String(err)}`);
     } finally {
@@ -322,6 +338,25 @@ export default function App() {
       setRotation(nextRotation);
     }
   };
+
+  const refreshSelectedTransformAfterPhysicsReady = async () => {
+    if (!selectedPath) return;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+      const response = await fetch(`${API_BASE}/physics/status`);
+      const status = await response.json() as PhysicsStatus;
+      setPhysics(status);
+      if (status.ready) {
+        await new Promise((resolve) => window.setTimeout(resolve, 100));
+        await loadSelectedTransform();
+        return;
+      }
+    }
+  };
+
+  const canEditTransform = () => !physicsBusy
+    && !physics?.playing
+    && !(physics?.running && !physics.ready);
 
   const updateSelectedTransform = async (nextTranslation: string[], nextRotation: string[]) => {
     if ([...nextTranslation, ...nextRotation].some((value) => value.trim() === '')) return;
@@ -393,6 +428,7 @@ export default function App() {
         await loadSelectedTransform();
       } else {
         setSelectedTransform(null);
+        setActiveTransformTool(null);
       }
     } catch (err) {
       console.warn('Pick failed:', err);
@@ -401,6 +437,16 @@ export default function App() {
 
   const handleMouseDown = (e: React.MouseEvent<HTMLVideoElement>) => {
     if (!connected) return;
+    if (e.button === 0 && activeTransformTool && selectedTransform && canEditTransform()) {
+      transformDragRef.current = {
+        tool: activeTransformTool,
+        x: e.clientX,
+        y: e.clientY,
+        translation: [...translationRef.current],
+        rotation: [...rotationRef.current],
+      };
+      return;
+    }
     mouseRef.current = {
       down: true,
       button: e.button,
@@ -411,7 +457,28 @@ export default function App() {
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLVideoElement>) => {
-    if (!connected || !mouseRef.current.down) return;
+    if (!connected) return;
+    const transformDrag = transformDragRef.current;
+    if (transformDrag) {
+      const dx = e.clientX - transformDrag.x;
+      const dy = e.clientY - transformDrag.y;
+      const amount = transformDrag.tool.endsWith('-x') ? dx : -dy;
+      const component = transformDrag.tool.endsWith('-x') ? 0 : transformDrag.tool.endsWith('-y') ? 1 : 2;
+      const nextTranslation = [...transformDrag.translation];
+      const nextRotation = [...transformDrag.rotation];
+      if (transformDrag.tool.startsWith('translate')) {
+        nextTranslation[component] = String(Number(transformDrag.translation[component]) + amount * 0.01);
+      } else {
+        nextRotation[component] = String(Number(transformDrag.rotation[component]) + amount * 0.25);
+      }
+      translationRef.current = nextTranslation;
+      rotationRef.current = nextRotation;
+      setTranslation(nextTranslation);
+      setRotation(nextRotation);
+      scheduleTransformUpdate(nextTranslation, nextRotation);
+      return;
+    }
+    if (!mouseRef.current.down) return;
     const dx = e.clientX - mouseRef.current.x;
     const dy = e.clientY - mouseRef.current.y;
     if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return;
@@ -438,7 +505,12 @@ export default function App() {
   };
 
   const handleMouseUp = (e: React.MouseEvent<HTMLVideoElement>) => {
-    if (!connected || !mouseRef.current.down) return;
+    if (!connected) return;
+    if (transformDragRef.current) {
+      transformDragRef.current = null;
+      return;
+    }
+    if (!mouseRef.current.down) return;
     const wasMoved = mouseRef.current.moved;
     mouseRef.current.down = false;
     if (wasMoved) return;
@@ -538,7 +610,7 @@ export default function App() {
             />
             Initialize physics after load
           </label>
-          <div className="hint">Streaming starts automatically. Physics remains paused.</div>
+          <div className="hint">Streaming starts automatically. Initialize physics only when you are ready to simulate.</div>
         </div>
 
         <div className="group">
@@ -580,7 +652,7 @@ export default function App() {
                     step="any"
                     value={value}
                     aria-label={`Translate ${['X', 'Y', 'Z'][index]}`}
-                    disabled={Boolean(physics?.playing)}
+                    disabled={!canEditTransform()}
                     onChange={(event) => updateTransformComponent('translation', index, event.target.value)}
                   />
                 ))}
@@ -594,13 +666,16 @@ export default function App() {
                     step="any"
                     value={value}
                     aria-label={`Rotate ${['X', 'Y', 'Z'][index]}`}
-                    disabled={Boolean(physics?.playing)}
+                    disabled={!canEditTransform()}
                     onChange={(event) => updateTransformComponent('rotation', index, event.target.value)}
                   />
                 ))}
               </div>
               {selectedTransform.rigid_body && physics?.playing && (
                 <div className="hint">Pause physics before repositioning this rigid body.</div>
+              )}
+              {selectedTransform.rigid_body && physics?.running && !physics.ready && (
+                <div className="hint">Waiting for physics to synchronize the selected body.</div>
               )}
               {selectedTransform.rigid_body && physics?.ready && !physics.playing && (
                 <div className="hint">Edits synchronize the paused body. Press Play to release it.</div>
@@ -667,6 +742,8 @@ export default function App() {
             Scroll: zoom
             <br />
             Click: select prim
+            <br />
+            Transform tool + left drag: edit selected axis
           </div>
         </div>
 
@@ -702,20 +779,40 @@ export default function App() {
       </aside>
 
       <main className="viewport">
-        <video
-          id="remote-video"
-          ref={videoRef}
-          width={streamSize.width}
-          height={streamSize.height}
-          autoPlay
-          playsInline
-          tabIndex={-1}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={() => { mouseRef.current.down = false; }}
-          onContextMenu={handleContextMenu}
-        />
+        <div className="viewport-video-host">
+          <video
+            id="remote-video"
+            ref={videoRef}
+            width={streamSize.width}
+            height={streamSize.height}
+            autoPlay
+            playsInline
+            tabIndex={-1}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={() => {
+              mouseRef.current.down = false;
+              transformDragRef.current = null;
+            }}
+            onContextMenu={handleContextMenu}
+          />
+        </div>
+        {selectedTransform && (
+          <div className="transform-toolbar" aria-label="Viewport transform tools">
+            {(['translate-x', 'translate-y', 'translate-z', 'rotate-x', 'rotate-y', 'rotate-z'] as TransformTool[]).map((tool) => (
+              <button
+                key={tool}
+                className={`transform-tool ${tool.slice(-1)} ${activeTransformTool === tool ? 'active' : ''}`}
+                onClick={() => setActiveTransformTool((current) => current === tool ? null : tool)}
+                disabled={!canEditTransform()}
+              >
+                {tool.startsWith('translate') ? 'Move' : 'Rotate'} {tool.slice(-1).toUpperCase()}
+              </button>
+            ))}
+            {activeTransformTool && <div className="transform-tool-hint">Drag in the viewport to edit {activeTransformTool.replace('-', ' ').toUpperCase()}.</div>}
+          </div>
+        )}
         {!connected && <div className="status">Stream not connected</div>}
       </main>
     </div>

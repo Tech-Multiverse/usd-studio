@@ -42,6 +42,7 @@ class StudioRenderer:
         self._camera_pitch = math.radians(30.0)
         self._selected_path: Optional[str] = None
         self._physics_scales: dict[str, np.ndarray] = {}
+        self._physics_transforms: dict[str, np.ndarray] = {}
 
         config = ovrtx.RendererConfig(
             selection_outline_enabled=True,
@@ -222,6 +223,7 @@ class StudioRenderer:
 
             self.scene_path = usd_path.resolve()
             self._physics_scales.clear()
+            self._physics_transforms.clear()
             self.camera_path = camera_path
             self.render_product = render_product
 
@@ -421,11 +423,17 @@ class StudioRenderer:
         return matrix
 
     def _read_transform(self, path: str) -> np.ndarray:
-        tensor = self._renderer.read_attribute("omni:xform", [path])
-        matrix = np.from_dlpack(tensor).reshape(4, 4).astype(np.float64, copy=True)
-        if not np.isfinite(matrix).all():
-            raise ValueError("Transform contains non-finite values")
-        return matrix
+        try:
+            tensor = self._renderer.read_attribute("omni:xform", [path])
+            matrix = np.from_dlpack(tensor).reshape(4, 4).astype(np.float64, copy=True)
+            if not np.isfinite(matrix).all():
+                raise ValueError("Transform contains non-finite values")
+            return matrix
+        except Exception:
+            cached = self._physics_transforms.get(path)
+            if cached is None:
+                raise
+            return cached.copy()
 
     def is_rigid_body(self, path: str) -> bool:
         with self._lock:
@@ -452,6 +460,30 @@ class StudioRenderer:
                 "rigid_body": self.is_rigid_body(path),
             }
 
+    def get_rigid_body_world_poses(self, paths: list[str]) -> list[dict]:
+        with self._lock:
+            matrices: dict[str, np.ndarray] = {}
+
+            def world_matrix(path: str) -> np.ndarray:
+                if path in matrices:
+                    return matrices[path]
+                local = self._read_transform(path)
+                parent_path = path.rsplit("/", 1)[0]
+                if parent_path:
+                    try:
+                        matrix = local @ world_matrix(parent_path)
+                    except Exception:
+                        matrix = local
+                else:
+                    matrix = local
+                matrices[path] = matrix
+                return matrix
+
+            return [
+                {"path": path, "matrix4d": world_matrix(path).tolist()}
+                for path in paths
+            ]
+
     def update_selected_transform(self, translation: list[float], rotation: list[float]) -> dict:
         values = np.asarray([*translation, *rotation], dtype=np.float64)
         if values.shape != (6,) or not np.isfinite(values).all():
@@ -468,6 +500,7 @@ class StudioRenderer:
                 attribute_name="omni:xform",
                 tensor=matrix.reshape(1, 4, 4),
             )
+            self._physics_transforms[path] = matrix.copy()
             parent_path = path.rsplit("/", 1)[0]
             if parent_path:
                 try:
@@ -519,7 +552,9 @@ class StudioRenderer:
                 if parent_world is None:
                     parent_world = np.eye(4, dtype=np.float64)
                 rigid_local = world_matrices[path] @ np.linalg.inv(parent_world)
-                local_matrices.append(self._physics_scales[path] @ rigid_local)
+                local_matrix = self._physics_scales[path] @ rigid_local
+                self._physics_transforms[path] = local_matrix.copy()
+                local_matrices.append(local_matrix)
             self._renderer.write_attribute(
                 prim_paths=paths,
                 attribute_name="omni:xform",

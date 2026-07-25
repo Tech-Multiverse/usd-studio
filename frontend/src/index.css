@@ -31,12 +31,66 @@ body {
 }
 
 .viewport {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   padding: 1rem;
   background: #0a0c0f;
+}
+
+.viewport-video-host {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  max-height: calc(100vh - 2rem);
+}
+
+.transform-toolbar {
+  position: absolute;
+  z-index: 1;
+  top: 1.5rem;
+  left: 1.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  max-width: 21rem;
+  padding: 0.5rem;
+  border: 1px solid #2a2e36;
+  border-radius: 6px;
+  background: rgba(17, 20, 26, 0.9);
+  backdrop-filter: blur(8px);
+}
+
+.transform-toolbar button {
+  margin: 0;
+  padding: 0.35rem 0.5rem;
+  background: #283548;
+}
+
+.transform-toolbar button.active {
+  background: #2563eb;
+  box-shadow: 0 0 0 1px #93c5fd;
+}
+
+.transform-toolbar button.x {
+  border-left: 3px solid #ef4444;
+}
+
+.transform-toolbar button.y {
+  border-left: 3px solid #22c55e;
+}
+
+.transform-toolbar button.z {
+  border-left: 3px solid #3b82f6;
+}
+
+.transform-tool-hint {
+  width: 100%;
+  color: #cbd5e1;
+  font-size: 0.75rem;
 }
 
 video {

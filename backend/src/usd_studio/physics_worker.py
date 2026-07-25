@@ -166,6 +166,27 @@ def main() -> int:
                             for index, body_path in enumerate(body_paths)
                         ],
                     })
+                elif action == "set_poses":
+                    if playing:
+                        raise RuntimeError("Pause physics before setting rigid-body poses")
+                    updated = request.get("prims", [])
+                    if not isinstance(updated, list):
+                        raise ValueError("Rigid-body poses must be a list")
+                    for item in updated:
+                        path = str(item.get("path", ""))
+                        if path not in body_paths:
+                            raise ValueError(f"Unknown rigid body: {path}")
+                        poses[body_paths.index(path)] = matrix_pose(item.get("matrix4d", []))
+                    binding.write(poses)
+                    binding.read(poses)
+                    emit({
+                        "type": "poses",
+                        "time": sim_time,
+                        "prims": [
+                            {"path": body_path, "matrix4d": pose_matrix(poses[index])}
+                            for index, body_path in enumerate(body_paths)
+                        ],
+                    })
                 elif action == "shutdown":
                     running = False
 

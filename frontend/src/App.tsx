@@ -8,6 +8,7 @@ interface SceneInfo {
   scene?: string;
   camera?: string;
   render_product?: string;
+  prims?: string[];
 }
 
 interface PhysicsStatus {
@@ -52,6 +53,8 @@ export default function App() {
   const [rotation, setRotation] = useState<string[]>(['0', '0', '0']);
   const [transformBusy, setTransformBusy] = useState(false);
   const [activeTransformTool, setActiveTransformTool] = useState<TransformTool | null>(null);
+  const [translationDragSpeed, setTranslationDragSpeed] = useState(0.1);
+  const [rotationDragSpeed, setRotationDragSpeed] = useState(0.05);
   const [physics, setPhysics] = useState<PhysicsStatus | null>(null);
   const [physicsBusy, setPhysicsBusy] = useState(false);
   const [sceneBusy, setSceneBusy] = useState(false);
@@ -61,6 +64,8 @@ export default function App() {
   const disconnectRef = useRef<(() => Promise<void>) | null>(null);
   const transformTimerRef = useRef<number | null>(null);
   const transformRequestRef = useRef(0);
+  const transformRequestInFlightRef = useRef(false);
+  const transformPendingRef = useRef<{ translation: string[]; rotation: string[] } | null>(null);
   const translationRef = useRef(translation);
   const rotationRef = useRef(rotation);
   const transformDragRef = useRef<{
@@ -130,7 +135,13 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Load failed');
       setScenePath(data.scene);
-      setScene({ loaded: true, scene: data.scene, camera: data.camera, render_product: data.render_product });
+      setScene({
+        loaded: true,
+        scene: data.scene,
+        camera: data.camera,
+        render_product: data.render_product,
+        prims: data.prims,
+      });
       setSelectedPath(null);
       setSelectedTransform(null);
       setActiveTransformTool(null);
@@ -358,12 +369,17 @@ export default function App() {
     && !physics?.playing
     && !(physics?.running && !physics.ready);
 
-  const updateSelectedTransform = async (nextTranslation: string[], nextRotation: string[]) => {
-    if ([...nextTranslation, ...nextRotation].some((value) => value.trim() === '')) return;
-    const translationValues = nextTranslation.map(Number);
-    const rotationValues = nextRotation.map(Number);
+  const flushTransformUpdate = async () => {
+    if (transformRequestInFlightRef.current) return;
+    const pending = transformPendingRef.current;
+    if (!pending) return;
+    transformPendingRef.current = null;
+    if ([...pending.translation, ...pending.rotation].some((value) => value.trim() === '')) return;
+    const translationValues = pending.translation.map(Number);
+    const rotationValues = pending.rotation.map(Number);
     if ([...translationValues, ...rotationValues].some((value) => !Number.isFinite(value))) return;
-    const requestId = ++transformRequestRef.current;
+    const requestId = transformRequestRef.current;
+    transformRequestInFlightRef.current = true;
     setTransformBusy(true);
     try {
       const response = await fetch(`${API_BASE}/selected/transform`, {
@@ -379,16 +395,19 @@ export default function App() {
     } catch (err) {
       if (requestId === transformRequestRef.current) log(`Transform error: ${String(err)}`);
     } finally {
-      if (requestId === transformRequestRef.current) setTransformBusy(false);
+      transformRequestInFlightRef.current = false;
+      setTransformBusy(false);
+      if (transformPendingRef.current) void flushTransformUpdate();
     }
   };
 
   const scheduleTransformUpdate = (nextTranslation: string[], nextRotation: string[]) => {
-    if (transformTimerRef.current !== null) window.clearTimeout(transformTimerRef.current);
+    transformPendingRef.current = { translation: nextTranslation, rotation: nextRotation };
+    if (transformTimerRef.current !== null || transformRequestInFlightRef.current) return;
     transformTimerRef.current = window.setTimeout(() => {
       transformTimerRef.current = null;
-      void updateSelectedTransform(nextTranslation, nextRotation);
-    }, 120);
+      void flushTransformUpdate();
+    }, 33);
   };
 
   const updateTransformComponent = (kind: 'translation' | 'rotation', index: number, value: string) => {
@@ -403,6 +422,31 @@ export default function App() {
     scheduleTransformUpdate(nextTranslation, nextRotation);
   };
 
+  const selectPrim = async (path: string | null) => {
+    if (transformTimerRef.current !== null) window.clearTimeout(transformTimerRef.current);
+    transformRequestRef.current += 1;
+    transformPendingRef.current = null;
+    setTransformBusy(false);
+    setSelectedPath(path);
+    try {
+      const response = await fetch(`${API_BASE}/select`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Selection failed');
+      if (path) {
+        await loadSelectedTransform();
+      } else {
+        setSelectedTransform(null);
+        setActiveTransformTool(null);
+      }
+    } catch (err) {
+      log(`Selection error: ${String(err)}`);
+    }
+  };
+
   const postPick = async (x: number, y: number) => {
     try {
       const res = await fetch(`${API_BASE}/pick`, {
@@ -413,23 +457,8 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Pick failed');
       const path = data.path || null;
-      if (transformTimerRef.current !== null) window.clearTimeout(transformTimerRef.current);
-      transformRequestRef.current += 1;
-      setTransformBusy(false);
-      setSelectedPath(path);
       log(path ? `Picked: ${path}` : 'Picked: nothing');
-      // Highlight on backend.
-      await fetch(`${API_BASE}/select`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path }),
-      });
-      if (path) {
-        await loadSelectedTransform();
-      } else {
-        setSelectedTransform(null);
-        setActiveTransformTool(null);
-      }
+      await selectPrim(path);
     } catch (err) {
       console.warn('Pick failed:', err);
     }
@@ -467,9 +496,9 @@ export default function App() {
       const nextTranslation = [...transformDrag.translation];
       const nextRotation = [...transformDrag.rotation];
       if (transformDrag.tool.startsWith('translate')) {
-        nextTranslation[component] = String(Number(transformDrag.translation[component]) + amount * 0.01);
+        nextTranslation[component] = (Number(transformDrag.translation[component]) + amount * translationDragSpeed).toFixed(4);
       } else {
-        nextRotation[component] = String(Number(transformDrag.rotation[component]) + amount * 0.25);
+        nextRotation[component] = (Number(transformDrag.rotation[component]) + amount * rotationDragSpeed).toFixed(2);
       }
       translationRef.current = nextTranslation;
       rotationRef.current = nextRotation;
@@ -508,6 +537,7 @@ export default function App() {
     if (!connected) return;
     if (transformDragRef.current) {
       transformDragRef.current = null;
+      void flushTransformUpdate();
       return;
     }
     if (!mouseRef.current.down) return;
@@ -630,6 +660,20 @@ export default function App() {
               <span className="error">No scene loaded</span>
             )}
           </div>
+        </div>
+
+        <div className="group">
+          <label>Scene prim</label>
+          <select
+            value={selectedPath || ''}
+            disabled={!scene?.loaded}
+            onChange={(event) => void selectPrim(event.target.value || null)}
+          >
+            <option value="">Select a prim</option>
+            {(scene?.prims || []).map((path) => (
+              <option key={path} value={path}>{path}</option>
+            ))}
+          </select>
         </div>
 
         <div className="group">
@@ -794,6 +838,7 @@ export default function App() {
             onMouseLeave={() => {
               mouseRef.current.down = false;
               transformDragRef.current = null;
+              void flushTransformUpdate();
             }}
             onContextMenu={handleContextMenu}
           />
@@ -810,6 +855,28 @@ export default function App() {
                 {tool.startsWith('translate') ? 'Move' : 'Rotate'} {tool.slice(-1).toUpperCase()}
               </button>
             ))}
+            <label className="transform-tool-hint">
+              Move speed: {translationDragSpeed.toFixed(2)} units/px
+              <input
+                type="range"
+                min="0.01"
+                max="1"
+                step="0.01"
+                value={translationDragSpeed}
+                onChange={(event) => setTranslationDragSpeed(Number(event.target.value))}
+              />
+            </label>
+            <label className="transform-tool-hint">
+              Rotate speed: {rotationDragSpeed.toFixed(2)}°/px
+              <input
+                type="range"
+                min="0.01"
+                max="0.25"
+                step="0.01"
+                value={rotationDragSpeed}
+                onChange={(event) => setRotationDragSpeed(Number(event.target.value))}
+              />
+            </label>
             {activeTransformTool && <div className="transform-tool-hint">Drag in the viewport to edit {activeTransformTool.replace('-', ' ').toUpperCase()}.</div>}
           </div>
         )}

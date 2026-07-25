@@ -28,7 +28,6 @@ interface PackageUpload {
 
 export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const archiveInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const streamStartingRef = useRef(false);
@@ -44,7 +43,7 @@ export default function App() {
   const [packageScenes, setPackageScenes] = useState<string[]>([]);
   const [initializePhysicsOnLoad, setInitializePhysicsOnLoad] = useState(true);
   const [logs, setLogs] = useState<string[]>([]);
-  const disconnectRef = useRef<(() => void) | null>(null);
+  const disconnectRef = useRef<(() => Promise<void>) | null>(null);
   const mouseRef = useRef<{ down: boolean; button: number; x: number; y: number; moved: boolean }>({
     down: false,
     button: 0,
@@ -104,7 +103,7 @@ export default function App() {
       setScene({ loaded: true, scene: data.scene, camera: data.camera, render_product: data.render_product });
       setPhysics(null);
       log(`Loaded ${data.scene} with ${data.prim_count} prims`);
-      await startStream();
+      await restartStream();
       if (initializePhysicsOnLoad) {
         await runPhysics('initialize');
       }
@@ -124,6 +123,22 @@ export default function App() {
     await loadScene(data.path);
   };
 
+  const browseAndLoadLocalScene = async () => {
+    setSceneBusy(true);
+    try {
+      const response = await fetch(`${API_BASE}/scene/browse`, { method: 'POST' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Unable to open the scene picker');
+      if (data.cancelled || !data.path) return;
+      setPackageScenes([]);
+      await loadScene(data.path);
+    } catch (err) {
+      log(`Browse error: ${String(err)}`);
+    } finally {
+      setSceneBusy(false);
+    }
+  };
+
   const uploadAndLoadScene = async (file: File) => {
     setSceneBusy(true);
     try {
@@ -140,7 +155,6 @@ export default function App() {
       log(`Upload error: ${String(err)}`);
       setSceneBusy(false);
     } finally {
-      if (fileInputRef.current) fileInputRef.current.value = '';
       if (archiveInputRef.current) archiveInputRef.current.value = '';
     }
   };
@@ -166,8 +180,8 @@ export default function App() {
     }
   };
 
-  const startStream = async () => {
-    if (!videoRef.current || connected || streamStartingRef.current) return;
+  const startStream = async (force = false) => {
+    if (!videoRef.current || (!force && connected) || streamStartingRef.current) return;
     streamStartingRef.current = true;
     try {
       const res = await fetch(`${API_BASE}/webrtc/start`, { method: 'POST' });
@@ -200,11 +214,26 @@ export default function App() {
     }
   };
 
-  const stopStream = () => {
-    disconnectRef.current?.();
+  const stopStream = async () => {
+    const disconnect = disconnectRef.current;
     disconnectRef.current = null;
-    setConnected(false);
-    log('WebRTC disconnected');
+    try {
+      await disconnect?.();
+    } catch (err) {
+      log(`WebRTC disconnect error: ${String(err)}`);
+    } finally {
+      if (videoRef.current) videoRef.current.srcObject = null;
+      setConnected(false);
+      log('WebRTC disconnected');
+    }
+  };
+
+  const restartStream = async () => {
+    if (disconnectRef.current || connected) {
+      await stopStream();
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+    }
+    await startStream(true);
   };
 
   useEffect(() => {
@@ -369,16 +398,6 @@ export default function App() {
             placeholder="C:/path/to/scene.usda"
           />
           <input
-            ref={fileInputRef}
-            type="file"
-            accept=".usd,.usda,.usdc,.usdz"
-            hidden
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) void uploadAndLoadScene(file);
-            }}
-          />
-          <input
             ref={archiveInputRef}
             type="file"
             accept=".zip"
@@ -398,7 +417,7 @@ export default function App() {
               if (files) void uploadAndLoadFolder(files);
             }}
           />
-          <button onClick={() => fileInputRef.current?.click()} disabled={sceneBusy}>
+          <button onClick={() => void browseAndLoadLocalScene()} disabled={sceneBusy}>
             Browse USD File
           </button>
           <button onClick={() => archiveInputRef.current?.click()} disabled={sceneBusy}>
@@ -509,7 +528,7 @@ export default function App() {
         </div>
 
         <div className="group">
-          <button onClick={startStream} disabled={connected || !scene?.loaded}>
+          <button onClick={() => void startStream()} disabled={connected || !scene?.loaded}>
             Start Stream
           </button>
           <button onClick={stopStream} disabled={!connected}>

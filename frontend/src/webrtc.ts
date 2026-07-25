@@ -39,7 +39,7 @@ export async function connectWebRTC(
   videoElementId: string,
   onStatus: (msg: string) => void,
   onStarted?: () => void,
-): Promise<() => void> {
+): Promise<() => Promise<void>> {
   const { AppStreamer, StreamType } = window.OVWebRTC;
 
   await AppStreamer.connect({
@@ -71,7 +71,7 @@ export async function connectWebRTC(
     },
   });
 
-  return () => {
-    void AppStreamer.terminate();
+  return async () => {
+    await AppStreamer.terminate();
   };
 }

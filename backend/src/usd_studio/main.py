@@ -135,6 +135,42 @@ async def scene_info():
     }
 
 
+def choose_local_scene() -> str | None:
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        selected = filedialog.askopenfilename(
+            parent=root,
+            title="Open USD Scene",
+            filetypes=[
+                ("USD scenes", "*.usd *.usda *.usdc *.usdz"),
+                ("All files", "*.*"),
+            ],
+        )
+    finally:
+        root.destroy()
+    return str(Path(selected).resolve()) if selected else None
+
+
+@app.post("/api/scene/browse")
+async def browse_local_scene():
+    try:
+        selected = await asyncio.to_thread(choose_local_scene)
+    except Exception as exc:
+        logger.exception("Failed to open the local scene picker")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if not selected:
+        return {"path": None, "cancelled": True}
+    path = Path(selected)
+    if path.suffix.lower() not in USD_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Choose a USD scene file")
+    return {"path": selected, "cancelled": False}
+
+
 @app.post("/api/scene/load")
 async def load_scene(req: LoadSceneRequest):
     if not renderer:

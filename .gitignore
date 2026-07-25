@@ -28,6 +28,7 @@ backend/ovrtx-studio-*.nv-gpudmp
 backend_stdout.txt
 backend_stderr.txt
 webrtc_internals_dump.txt
+/uploads/
 
 # Allow the AI/IDE to view rendered test stills
 *.png

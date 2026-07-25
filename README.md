@@ -8,7 +8,9 @@ A browser-based multimedia production tool built on NVIDIA Omniverse libraries:
 - [`ovstream`](https://github.com/nvidia-omniverse/ovstream) for WebRTC streaming
 - [`ovphysx`](https://github.com/NVIDIA-Omniverse/PhysX/tree/main/ovphysx) for rigid-body physics
 
-Load a USD scene, view it live in the browser, run its rigid-body simulation, and render stills or MP4 videos for media production.
+Load a USD scene, view it live in the browser, run its rigid-body simulation, and render still images for media production.
+
+See [ROADMAP.md](ROADMAP.md) for completed milestones, known limitations, and the planned path to scene editing, lighting, animation, and video production.
 
 ## Requirements
 
@@ -37,16 +39,16 @@ Load a USD scene, view it live in the browser, run its rigid-body simulation, an
 
 4. Open http://localhost:5173 in your browser.
 
-5. Click **Browse USD File** for a standalone scene, **Browse ZIP** for a packaged scene, or **Browse Folder** to upload a complete scene directory. You can also enter a server-local path and click **Load Scene**.
+5. Click **Browse USD File** to choose a scene from the backend workstation with relative references intact, **Browse ZIP** for a packaged scene, or **Browse Folder** to upload a complete scene directory. You can also enter a server-local path and click **Load Scene Path**.
 
 6. WebRTC streaming starts automatically after the scene loads. Physics initialization is enabled by default and remains paused until you click **Play**. Clear **Initialize physics after load** before loading if you only want rendering.
 
 ### Scene Loading
 
-- **USD File:** Uploads and loads a standalone `.usd`, `.usda`, `.usdc`, or `.usdz` scene.
+- **USD File:** Opens a native picker on the local backend workstation and loads the selected `.usd`, `.usda`, `.usdc`, or `.usdz` path without copying it, preserving access to neighboring referenced assets.
 - **ZIP:** Securely extracts a `.zip` package while preserving its directory structure.
 - **Folder:** Uploads a complete directory with relative paths intact so textures, payloads, references, and sublayers remain resolvable.
-- **Multiple scenes:** The shallowest likely root scene loads automatically. If a package contains multiple USD files, use **Package scenes** to select another one and click **Load Scene**.
+- **Multiple scenes:** The shallowest likely root scene loads automatically. If a package contains multiple USD files, use **Package scenes** to select another one and click **Load Scene Path**.
 - **Path:** Loads a path directly from the backend machine without copying it.
 - **Streaming:** Starts and connects automatically when a scene is available. Manual stream controls remain available as a fallback.
 - **Physics:** Initializes automatically by default but does not auto-play. Scenes without supported rigid bodies report a physics error without preventing rendering.
@@ -65,7 +67,7 @@ usd_studio/
     main.py                 API endpoints
   frontend/                 React + TypeScript UI
   data/                     Sample USD scenes
-  outputs/                  Rendered stills/videos
+  outputs/                  Rendered still images
   docker-compose.yml        Future Docker support
 ```
 
@@ -74,5 +76,5 @@ usd_studio/
 - The first run of `ovrtx` or `ovphysx` compiles and caches shaders; startup may take a minute or two.
 - If a USD scene lacks a camera or light, the backend injects a default camera, dome light, and distant light automatically.
 - Physics runs in an isolated CPU subprocess because `ovrtx` and `ovphysx` must not coexist in one process.
-- Package uploads are stored in unique runtime directories under `backend/uploads/`, which is excluded from Git.
+- Package uploads are stored in unique directories under the configured runtime uploads directory, which is excluded from Git.
 - ZIP and folder uploads default to limits of 20,000 files, 2 GiB transferred, and 5 GiB expanded; these limits are configurable through environment settings.
